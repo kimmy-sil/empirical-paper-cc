@@ -64,6 +64,8 @@ Calls: `skills/literature-review`（文献搜索）
    - Novelty
    - Policy relevance
 
+用户可提供 Research Prompt（参考 `templates/research-prompt-template.md` 格式），直接跳过 Stage 1-2，从 Stage 3 开始。
+
 ### ◆ HUMAN GATE: Select Research Question
 
 Present all candidates with scores. Ask user to:

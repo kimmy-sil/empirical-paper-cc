@@ -428,3 +428,416 @@ output/
   rdd_placebo_cutoffs.csv     # 安慰剂断点
   rdd_donut_hole.csv          # Donut hole 检验
 ```
+
+---
+
+## RDD 变体与方法论深度补充
+
+### A. 五种断点类型分类
+
+| 断点类型 | 代表场景 | 适用条件 | 核心假设 | 常见陷阱 | 代表文献 |
+|----------|----------|----------|----------|----------|----------|
+| **分数/声誉断点** | 高考分数线、录取分数线、信用评级阈值 | 评分规则公开、断点唯一且确定 | Sharp RDD: D = 1(R ≥ c)，无报名上造假操控 | 分数堆积（最常见）；跨年分数比较 | Lee (2008) 选举; Hoekstra (2009) 旗舰大学 |
+| **年龄断点** | 退休年龄、养老金参保年龄、医保资格年龄 | 处理和取消分段实施；坐标嵎稳定 | Fuzzy RDD（选择性提前/延后参保） | 递归现象（情堅者最山值时玴年）；年龄测量误差 | Card et al. (2008) 医保; Angrist & Krueger (1991) |
+| **时间断点（RDiT）** | 政策实施日、法律修改日、交易开放日 | 时间序列数据；政策在确定日期生效 | 潜在结果趋势可控、无其他政策同年交叉 | 时间序列自相关；季节性操控不当 | Hausman & Rapson (2018); Davis (2008) 污染 |
+| **地理断点** | 秦岭-淦河线、行政边界、气候分界线 | 地理边界干净、边界两侧可比 | 到边界距离为评分变量；人口特征在边界处连续 | 边界吒合选择（商业选址、移民）；空间异质性 | Dell (2010) 内战; Huang et al. (2014) 秦岭-淦河 |
+| **指标阈值** | AQI 阈值、资产负值线、财务门槛 | 阈值备巴且清晰已知；个体无法精确操控指标 | 指标评分无操控导致不连续；多阈值不产生交互 | 太多阈值陨阱（带宽不够）；安慰剂断点被拉低 | Chen et al. (2013) AQI; Grembi et al. (2016) 财务规则 |
+
+---
+
+### B. RDiT（时间断点回归，Regression Discontinuity in Time）
+
+#### B1. 与标准 RDD 的关键区别
+
+| 维度 | 标准截面 RDD | RDiT（时间 RDD） |
+|------|--------------|-------------------|
+| 评分变量 | 截面指标（考分、指标值） | 时间（日/周/月） |
+| 操控检验 | McCrary 密度检验 | 不可直接应用（时间无法“堆积”）→ 方法文献不要求 |
+| 主要威胁 | 操控、协变量不平衡 | 时间序列自相关、季节性、同时政策 |
+| 内部效度假设 | 断点两侧连续性 | 政策实施日前后的潜在结果趋势可控 |
+| 需要额外检验 | 协变量平衡，Donut hole | 自相关检验、季节性控制、预期效应检验 |
+
+**要点提示：** 如果政策是渐进推行（phased-in）而非立即生效，RDiT 可能高估带宽或低估效应，需要单独处理。
+
+#### B2. R 代码模板
+
+```r
+# RDiT: 时间断点回归模板
+library(rdrobust)
+library(fixest)
+library(dplyr)
+library(lubridate)   # 日期处理
+library(tseries)     # 自相关检验
+
+# ---- 第一步：构造时间评分变量 ----
+# policy_date: 政策实施日（如 as.Date("2015-01-01")）
+policy_date <- as.Date("2015-01-01")
+
+df <- df %>%
+  mutate(
+    # 时间评分变量：政策日前后的日数（中心化）
+    t_centered = as.numeric(date - policy_date),
+    # 政策虚拟变量
+    post_policy = as.integer(t_centered >= 0),
+    # 季节性控制（月份虽然不完全解决季节性，但是一个起点）
+    month_of_year = month(date),
+    day_of_week   = wday(date)
+  )
+
+# ---- 第二步：自相关检验（内部效度关键）----
+# 检验年内结果变量的自相关，验证时间序列假设是否成立
+outcome_ts <- ts(df$outcome[order(df$date)], frequency = 365)
+Box.test(outcome_ts, lag = 20, type = "Ljung-Box")  # H0: 无自相关
+
+# 如果显著自相关，需要在模型中控制
+df <- df %>%
+  arrange(date) %>%
+  mutate(outcome_lag1 = lag(outcome, 1))  # 加入滞后项
+
+# ---- 第三步：季节性控制 ----
+# 方法1：加入月份固定效应
+# 方法2：用历史同时期（去年同期）作为控制
+# 方法3： Fourier 项控制年内周期性
+df <- df %>%
+  mutate(
+    sin_yearly  = sin(2 * pi * yday(date) / 365),
+    cos_yearly  = cos(2 * pi * yday(date) / 365),
+    sin_weekly  = sin(2 * pi * wday(date) / 7),
+    cos_weekly  = cos(2 * pi * wday(date) / 7)
+  )
+
+# ---- 第四步：RDiT 主估计（rdrobust 应用于时间维度）----
+# 以 t_centered 为评分变量
+rdit_main <- rdrobust(
+  y        = df$outcome,
+  x        = df$t_centered,
+  c        = 0,
+  p        = 1,
+  kernel   = "triangular",
+  bwselect = "mserd"
+)
+summary(rdit_main)
+# 注意：带宽选择会基于时间单位（如日），解释时要说明带宽单位
+
+# ---- 第五步：带季节性控制的 RDiT（feols 方法）----
+res_rdit_fe <- feols(
+  outcome ~ t_centered + i(post_policy, t_centered) +  # 断点两侧不同斜率
+    sin_yearly + cos_yearly + sin_weekly + cos_weekly | # Fourier 控制季节性
+    month_of_year + day_of_week,                        # 月份和周内日固定效应
+  data = df %>% filter(abs(t_centered) <= rdit_main$bws["h", 1])  # 限制带宽内
+)
+summary(res_rdit_fe)
+
+# ---- 第六步：预期效应检验（应不显著）----
+# 在政策实施日唤取若干天前，检验是否已有预期行为
+df_pre_window <- df %>%
+  filter(t_centered >= -60, t_centered < 0) %>%  # 政策前 60 天
+  mutate(placebo_post = as.integer(t_centered >= -30))  # 假设 30 天前为假断点
+
+res_anticipation <- feols(
+  outcome ~ t_centered + i(placebo_post, t_centered) +
+    sin_yearly + cos_yearly | month_of_year,
+  data = df_pre_window
+)
+summary(res_anticipation)
+# 期望： placebo_post 系数不显著（无预期效应）
+
+# ---- 第七步：带宽敏感性（时间 RDD 特别重要）----
+bw_days <- c(30, 60, 90, 180, 365)  # 不同日数带宽
+
+rdit_bw_res <- lapply(bw_days, function(h) {
+  res <- rdrobust(y = df$outcome, x = df$t_centered, c = 0, p = 1, h = h)
+  data.frame(
+    bw_days = h,
+    coef    = res$coef["Bias-Corrected", 1],
+    ci_low  = res$ci["Robust", 1],
+    ci_hi   = res$ci["Robust", 2]
+  )
+}) %>% bind_rows()
+print(rdit_bw_res)
+```
+
+**RDiT 额外检验应包含：**
+1. 自相关检验（Ljung-Box / ADF）
+2. 季节性控制（Fourier 项或月份固定效应）
+3. 预期效应检验（政策日前窗口内假断点）
+4. 同时政策检验（添加对操组/其他窗口赴 DiD 检验）
+
+---
+
+### C. 地理 RDD（Geographic / Spatial RDD）
+
+#### C1. 方法框架
+
+以地理边界（如行政边界、气候分界线、历史分割线）为断点，个体到边界的距离为评分变量：
+
+$$R_i = \text{dist}(\text{location}_i, \text{boundary})$$
+
+- $R_i > 0$：边界一侧（处理组）
+- $R_i < 0$：边界另一侧（控制组）
+
+**内部效度假设：** 边界两侧的个体除了受到不同制度/政策外，其他特征应该连续
+
+**额外识别挑战：**
+- 边界吧合选择（人口、企业在边界两侧分布不均衡）
+- 空间溢出效应（spillovers）导致边界两侧潜在结果不完全独立
+- 地理近邻内生性（地理近邻 = 经济联系密切）
+
+#### C2. R 代码框架（sf + rdrobust）
+
+```r
+# 地理 RDD 完整流程
+library(sf)         # 空间数据
+library(rdrobust)   # RDD 估计
+library(dplyr)
+library(ggplot2)
+
+# ---- 第一步：读入地理数据 ----
+# df_points: 含个体地理坐标（经纬度）和结果变量
+df_sf <- st_as_sf(df_points, coords = c("longitude", "latitude"), crs = 4326)
+
+# 边界 shp 文件（如凝河-秦岭线、行政分界线）
+boundary_line <- st_read("data/boundary_line.shp") %>%
+  st_transform(crs = 4326)  # 确保坐标系一致
+
+# ---- 第二步：计算到边界的符号距离 ----
+# 第二步关键：距离需要带“方向”（哪侧为处理、哪侧为控制）
+
+# 计算每个个体到边界直线距离
+df_sf$dist_to_boundary <- as.numeric(
+  st_distance(df_sf, st_union(boundary_line))  # 单位：米
+) / 1000  # 转换为公里
+
+# 确定方向：例如北方为处理组
+# 方法：用点在大边界多边形内的判断
+treatment_area <- st_read("data/treatment_region.shp") %>%
+  st_transform(crs = 4326)
+
+df_sf$treated <- as.integer(st_within(df_sf, treatment_area, sparse = FALSE)[, 1])
+
+# 符号化距离：处理组为正，控制组为负
+df_sf <- df_sf %>%
+  mutate(r_geo = ifelse(treated == 1, dist_to_boundary, -dist_to_boundary))
+
+df <- df_sf %>% st_drop_geometry()  # 去掉圆形信息，转为普通 df
+
+# ---- 第三步：地理 RDD 可视化 ----
+ggplot(df_sf) +
+  geom_sf(aes(color = as.factor(treated)), alpha = 0.3, size = 0.5) +
+  geom_sf(data = boundary_line, color = "black", linewidth = 1) +
+  scale_color_manual(values = c("blue", "red"), labels = c("Control", "Treated")) +
+  labs(title = "Geographic RDD: Sample Distribution",
+       color = "Treatment Status") +
+  theme_minimal()
+
+# RDD 断点图（距离 vs 结果）
+rdplot(y = df$outcome, x = df$r_geo, c = 0,
+       title = "Geographic RDD Plot",
+       x.label = "Distance to Boundary (km, signed)",
+       y.label = "Outcome")
+
+# ---- 第四步：主估计 ----
+rdd_geo <- rdrobust(
+  y        = df$outcome,
+  x        = df$r_geo,
+  c        = 0,
+  p        = 1,
+  kernel   = "triangular",
+  bwselect = "mserd"
+)
+summary(rdd_geo)
+
+# ---- 第五步：女0位特征连续性检验（边界两侧人口特征平衡）----
+geo_balance <- lapply(geo_covariates, function(cov) {
+  res <- rdrobust(y = df[[cov]], x = df$r_geo, c = 0, p = 1, bwselect = "mserd")
+  data.frame(
+    covariate = cov,
+    coef      = res$coef["Conventional", 1],
+    p_robust  = res$pv["Robust", 1]
+  )
+}) %>% bind_rows()
+
+print(geo_balance)
+# 期望：所有人口特征（年龄结构、心里收入、为业结构）系数不显著
+
+# ---- 第六步：空间溢出检验 ----
+# 颞边界维度（地理 RDD 特有）
+df <- df %>%
+  mutate(
+    # 个体在边界上的“坐标”（投影到边界线上的位置）
+    along_boundary = # ... GIS 计算投影坐标
+  )
+
+# 如果结果因"along"方向而异质，考虑加入 along_boundary 一阶项
+res_geo_ctrl <- feols(
+  outcome ~ r_geo + post_boundary + r_geo:post_boundary +
+    along_boundary + along_boundary:post_boundary,  # 控制地理投影方向
+  data = df %>% filter(abs(r_geo) <= rdd_geo$bws["h", 1])
+)
+summary(res_geo_ctrl)
+```
+
+**地理 RDD 额外检验：**
+
+| 检验 | 方法 | 目的 |
+|------|------|------|
+| 边界两侧人口特征 | 协变量 RDD | 证明边界两侧人口特征连续 |
+| 空间溢出评估 | 湛边界对控组延伸结果检验 | 处理和控制组在边界两侧是否相似 |
+| 坷擔 | Donut hole（排除最近边界的个体） | 排除可能选择性迁居 |
+| 安慰剂边界 | 用附近平行边界作为安慰剂 | 边界不应显示断点 |
+| 大圆场控制 | 加入 along_boundary 项 | 控制边界展开方向的地理异质性 |
+
+---
+
+### D. 多门槛 RDD（Multi-Cutoff RDD）
+
+#### D1. 适用场景
+
+- 全国不同地区 / 学校有不同录取分数线
+- 同一政策在不同年份变动阈值
+- 指标类行业（如 AQI 预警级别：一级、2级、3级阈值不同）
+
+**核心思路（Cattaneo et al. 2016）：**
+
+将评分变量标准化到各自阈值：$\tilde{R}_{ic} = R_i - c_j（c_j 是个体 i 面对的阈值）$，再合并估计。
+
+#### D2. R 代码（rdmc 包）
+
+```r
+# 安装
+library(rdrobust)  # 包含 rdmc 函数
+library(dplyr)
+
+# ---- 情景一：不同地区的不同录取分数线 ----
+# df 包含: running_var, outcome, school_id, cutoff（每所学校的录取分数线不同）
+
+# 方法1： 标准化并合并（Normalisation-and-Pooling）
+df_norm <- df %>%
+  mutate(
+    r_normalized = running_var - cutoff,  # 将每个个体的评分变量对Α自就的阈值中心化
+    above_cutoff  = as.integer(r_normalized >= 0)
+  )
+
+# 合并后用 rdrobust（最简单的方法，但假设所有断点等同）
+rdd_pooled <- rdrobust(
+  y        = df_norm$outcome,
+  x        = df_norm$r_normalized,
+  c        = 0,
+  p        = 1,
+  bwselect = "mserd"
+)
+summary(rdd_pooled)  # 报告 pooled LATE
+
+# ---- 方法2： rdmc（Cattaneo et al. 推荐方法）----
+# 主要优势：允许带宽在不同断点间变化
+
+# 准备数据：居分 cutoff 索引
+# rdmc 要求：所有断点的列表
+cutoffs <- unique(df$cutoff)
+cat("Total cutoffs:", length(cutoffs), "\n")
+print(sort(cutoffs))
+
+# 运行 rdmc
+rdd_mc <- rdmc(
+  y = df_norm$outcome,   # 结果变量
+  x = df_norm$r_normalized,  # 标准化后的评分变量
+  c = sort(unique(df_norm$r_normalized[df_norm$above_cutoff == 1 & df_norm$r_normalized == 0]))  # 每个断点位置
+  # 注：标准化后所有断点都在 0 处 → 就是 c=0 的 pooled 问题
+)
+# 如果每个断点不同，不要标准化，直接传入原始阈值
+rdd_mc_raw <- rdmc(
+  y = df$outcome,
+  x = df$running_var,
+  c = sort(unique(df$cutoff))  # 每个个体对应的阈值
+)
+summary(rdd_mc_raw)
+# 输出：每个断点的个体 RDD 估计 + 加权平均（pooled estimate）
+
+# ---- 方法3：分断点单独估计 + 概证平均 ----
+# 对每个阈值单独做 RDD
+by_cutoff <- lapply(cutoffs, function(c_val) {
+  sub_df <- df %>% filter(cutoff == c_val) %>%
+    mutate(r_c = running_var - c_val)
+  
+  if (sum(sub_df$r_c >= 0) < 20 | sum(sub_df$r_c < 0) < 20) {
+    return(NULL)  # 带宽内样本量不足，跳过
+  }
+  
+  res <- rdrobust(y = sub_df$outcome, x = sub_df$r_c, c = 0, p = 1)
+  data.frame(
+    cutoff    = c_val,
+    coef_bc   = res$coef["Bias-Corrected", 1],
+    ci_low    = res$ci["Robust", 1],
+    ci_hi     = res$ci["Robust", 2],
+    n_left    = res$N_h[1],
+    n_right   = res$N_h[2]
+  )
+}) %>% bind_rows()
+
+print(by_cutoff)
+
+# 绘制多断点系数图
+ggplot(by_cutoff, aes(x = as.factor(cutoff), y = coef_bc)) +
+  geom_point(size = 3) +
+  geom_errorbar(aes(ymin = ci_low, ymax = ci_hi), width = 0.2) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray") +
+  labs(
+    title = "RDD Estimates by Cutoff",
+    x     = "Cutoff Value",
+    y     = "RDD Estimate (Bias-corrected Robust CI)"
+  ) +
+  coord_flip() +
+  theme_minimal()
+
+# ---- 方法4：异质性检验（各断点效应是否相同）----
+# Wald 检验：各断点之间的差异是否显著
+if (nrow(by_cutoff) >= 2) {
+  # 简单估计各断点系数的加权平均
+  w <- 1 / ((by_cutoff$ci_hi - by_cutoff$ci_low) / (2 * 1.96))^2  # 逆方差加权
+  pooled_est <- weighted.mean(by_cutoff$coef_bc, w)
+  cat(sprintf("\nPooled RDD estimate (inverse-variance weighted): %.4f\n", pooled_est))
+  cat("Individual cutoff estimates:\n")
+  print(by_cutoff[, c("cutoff", "coef_bc", "ci_low", "ci_hi")])
+}
+```
+
+**Stata 代码（rdmulti）：**
+
+```stata
+* 安装
+* ssc install rdrobust   (* 包含 rdmc rdplot rdrobust rdmulti）
+
+* ---- 方法1： rdmc 多断点 RDD ----
+* 数据需要：审分变量 r、结果 y、每个个体对应的 cutoff 变量 c
+
+* 标准化并合并（全部对各自阈值中心化）
+gen r_norm = running_var - cutoff
+
+* Pooled RDD
+rdrobust outcome r_norm, c(0) p(1) kernel(triangular) bwselect(mserd)
+
+* ---- 方法2： rdmc（Cattaneo-Titiunik-Vazquez-Bare 2020）----
+* 需要对每个断点单独提供维度
+rdmc outcome running_var, c(cutoff_list) p(1) bwselect(mserd)
+* cutoff_list = 空格分隔的各个阈值值（如 "60 70 80 90"）
+* 输出：每个断点的单独估计 + 加权平均
+
+* ---- 方法3： 多阈值切点的安慰剂检验 ----
+* 对每个断点，在其两侧各设一个安慰剂断点
+foreach c of numlist 60 70 80 90 {
+    * 假断点往左企移 5 分
+    local fake_c = `c' - 5
+    qui rdrobust outcome running_var if running_var < `c', c(`fake_c') p(1)
+    scalar placebo_coef_`c' = e(coef)
+    scalar placebo_pv_`c'   = e(pv_rb)
+}
+```
+
+**多门槛 RDD 实践建议：**
+
+| 问题 | 建议 |
+|------|------|
+| 各断点样本量差异很大 | 用逆方差加权合并 | 
+| 断点特征不同（如不同地区） | 分断点报告 + 差异性横截面回归 |
+| 担心分断点检验样本量不足 | 每个断点至少需要 200+ 个样本 | 
+| 各断点和并后报告哪个 | 主估计用 pooled，武为稳健性单独一一列出 |
