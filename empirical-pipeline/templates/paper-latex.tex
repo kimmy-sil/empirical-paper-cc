@@ -1,0 +1,233 @@
+% ============================================================
+% 实证论文 LaTeX 模板 — AER/QJE/管理世界 风格
+% 使用: 替换 [方括号] 中的内容
+% 编译: xelatex → bibtex → xelatex × 2
+% ============================================================
+\documentclass[12pt,a4paper]{article}
+
+% === 基础包 ===
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{graphicx}
+\usepackage{booktabs}        % 三线表
+\usepackage{tabularx}
+\usepackage{multirow}
+\usepackage{float}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage[colorlinks=true,linkcolor=blue,citecolor=blue,urlcolor=blue]{hyperref}
+\usepackage{natbib}          % 引用格式
+\usepackage{setspace}
+\usepackage{geometry}
+\usepackage{threeparttable}  % 表格注释
+
+% === 中文支持（如需要） ===
+% \usepackage{xeCJK}
+% \setCJKmainfont{SimSun}     % 宋体
+% \setCJKmonofont{SimHei}     % 黑体
+
+% === 页面设置 ===
+\geometry{left=2.5cm, right=2.5cm, top=2.5cm, bottom=2.5cm}
+\onehalfspacing               % 1.5倍行距
+
+% === 标题信息 ===
+\title{\textbf{[论文标题]}\thanks{[致谢/基金信息]}}
+\author{
+    [作者1]\thanks{[单位、邮箱]} \and
+    [作者2]\thanks{[单位、邮箱]}
+}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+\noindent
+[摘要内容，250-300词。研究问题→方法→核心发现→政策启示]
+
+\medskip
+\noindent\textbf{Keywords:} [关键词1]; [关键词2]; [关键词3]; [关键词4]
+
+\noindent\textbf{JEL Codes:} [C23]; [D83]; [L86]
+\end{abstract}
+
+\newpage
+
+% ============================================================
+\section{Introduction}
+% ============================================================
+
+[引言正文。1500-2000词，5-7段。]
+
+[P1: 研究背景与动机]
+
+[P2-3: 文献空白]
+
+[P4: 本文做了什么]
+
+[P5: 核心发现]
+
+[P6: 贡献]
+
+The remainder of the paper is organized as follows. Section~\ref{sec:background} provides institutional background. Section~\ref{sec:literature} reviews related literature. Section~\ref{sec:data} describes the data. Section~\ref{sec:strategy} presents the empirical strategy. Section~\ref{sec:results} reports the results. Section~\ref{sec:conclusion} concludes.
+
+
+% ============================================================
+\section{Institutional Background}\label{sec:background}
+% ============================================================
+
+[制度/政策背景。1000-1500词。]
+
+
+% ============================================================
+\section{Literature Review}\label{sec:literature}
+% ============================================================
+
+[文献综述。1500-2000词，按主题组织。]
+
+
+% ============================================================
+\section{Data and Variables}\label{sec:data}
+% ============================================================
+
+\subsection{Data Sources}
+
+[数据来源描述]
+
+\subsection{Variable Definitions}
+
+[变量定义]
+
+\subsection{Descriptive Statistics}
+
+Table~\ref{tab:summary} presents summary statistics for the main variables.
+
+\begin{table}[H]
+\centering
+\caption{Summary Statistics}\label{tab:summary}
+\begin{threeparttable}
+\begin{tabular}{lccccc}
+\toprule
+Variable & N & Mean & SD & Min & Max \\
+\midrule
+[因变量] & [N] & [mean] & [sd] & [min] & [max] \\
+[自变量] & [N] & [mean] & [sd] & [min] & [max] \\
+[控制变量1] & [N] & [mean] & [sd] & [min] & [max] \\
+[控制变量2] & [N] & [mean] & [sd] & [min] & [max] \\
+\bottomrule
+\end{tabular}
+\begin{tablenotes}[flushleft]
+\small
+\item Notes: [说明数据来源、样本限制等]
+\end{tablenotes}
+\end{threeparttable}
+\end{table}
+
+
+% ============================================================
+\section{Empirical Strategy}\label{sec:strategy}
+% ============================================================
+
+[识别策略说明]
+
+The baseline specification is:
+\begin{equation}\label{eq:did}
+Y_{it} = \alpha_i + \delta_t + \beta \cdot \text{Treat}_i \times \text{Post}_t + X'_{it}\gamma + \varepsilon_{it}
+\end{equation}
+where $Y_{it}$ is [因变量] for unit $i$ in period $t$, $\alpha_i$ and $\delta_t$ are entity and time fixed effects, $\text{Treat}_i \times \text{Post}_t$ is the DID interaction, $X_{it}$ is a vector of controls, and $\varepsilon_{it}$ is the error term clustered at the [聚类层级] level.
+
+The coefficient of interest is $\beta$, which captures [经济含义].
+
+
+% ============================================================
+\section{Results}\label{sec:results}
+% ============================================================
+
+\subsection{Main Results}
+
+Table~\ref{tab:main} reports the main results.
+
+\begin{table}[H]
+\centering
+\caption{Main Results}\label{tab:main}
+\begin{threeparttable}
+\begin{tabular}{lcccc}
+\toprule
+ & (1) & (2) & (3) & (4) \\
+\midrule
+Dep. Var.: & \multicolumn{4}{c}{[因变量]} \\
+\midrule
+Treat $\times$ Post & [coef]*** & [coef]*** & [coef]*** & [coef]*** \\
+ & ([se]) & ([se]) & ([se]) & ([se]) \\
+\midrule
+Controls & No & Yes & Yes & Yes \\
+Entity FE & Yes & Yes & Yes & Yes \\
+Year FE & Yes & Yes & Yes & Yes \\
+Province $\times$ Year FE & No & No & Yes & Yes \\
+\midrule
+Observations & [N] & [N] & [N] & [N] \\
+$R^2$ (within) & [R2] & [R2] & [R2] & [R2] \\
+\bottomrule
+\end{tabular}
+\begin{tablenotes}[flushleft]
+\small
+\item Notes: Robust standard errors clustered at the [level] level in parentheses. *** $p<0.01$, ** $p<0.05$, * $p<0.1$.
+\end{tablenotes}
+\end{threeparttable}
+\end{table}
+
+\subsection{Parallel Trends}
+
+Figure~\ref{fig:event} presents the event study estimates.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.85\textwidth]{figures/fig2_event_study.png}
+\caption{Event Study: Dynamic Treatment Effects}\label{fig:event}
+\begin{minipage}{0.85\textwidth}
+\small
+\textit{Notes:} [说明。基准期、置信区间、聚类方式等]
+\end{minipage}
+\end{figure}
+
+\subsection{Robustness Checks}
+
+[稳健性检验结果]
+
+\subsection{Heterogeneity Analysis}
+
+[异质性分析结果]
+
+
+% ============================================================
+\section{Conclusion}\label{sec:conclusion}
+% ============================================================
+
+[结论。800-1000词。核心发现→政策含义→局限→未来方向]
+
+
+% ============================================================
+% 参考文献
+% ============================================================
+\newpage
+\bibliographystyle{aer}   % AER 格式; 或用 chicago, apa
+\bibliography{references}  % references.bib 文件
+
+% 如不用 bib 文件，可手动列出:
+% \begin{thebibliography}{99}
+% \bibitem{author2024} Author, A. (2024). Title. \textit{Journal}, 1(1), 1-20.
+% \end{thebibliography}
+
+
+% ============================================================
+% 附录（如需要）
+% ============================================================
+\newpage
+\appendix
+\section{Additional Tables and Figures}\label{app:additional}
+
+[附录表格和图]
+
+\end{document}

@@ -1,0 +1,252 @@
+% ============================================================
+% 学术汇报 Beamer 模板
+% 编译: xelatex beamer-slides.tex
+% ============================================================
+\documentclass[aspectratio=169,11pt]{beamer}
+
+% === 主题 ===
+\usetheme{Madrid}
+\usecolortheme{default}
+\setbeamertemplate{navigation symbols}{}
+\setbeamertemplate{footline}[frame number]
+\setbeamertemplate{caption}[numbered]
+
+% === 包 ===
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{tikz}
+\usepackage{appendixnumberbeamer}
+
+% === 中文支持（如需要） ===
+% \usepackage{xeCJK}
+% \setCJKmainfont{SimSun}
+
+% === 自定义颜色 ===
+\definecolor{mainblue}{RGB}{44,62,80}
+\definecolor{accentred}{RGB}{192,57,43}
+\setbeamercolor{title}{fg=mainblue}
+\setbeamercolor{frametitle}{fg=mainblue}
+\setbeamercolor{structure}{fg=mainblue}
+
+% === 标题信息 ===
+\title[\shorttitle]{[论文完整标题]}
+\newcommand{\shorttitle}{[短标题]}
+\author{[作者]}
+\institute{[单位]}
+\date{[日期/会议名称]}
+
+\begin{document}
+
+% ============================================================
+\begin{frame}
+\titlepage
+\end{frame}
+% ============================================================
+
+% ============================================================
+\begin{frame}{Outline}
+\tableofcontents
+\end{frame}
+% ============================================================
+
+
+% ============================================================
+\section{Motivation}
+% ============================================================
+
+\begin{frame}{Research Question}
+\begin{itemize}
+    \item \textbf{Core Question:} [一句话研究问题]
+    \vspace{1em}
+    \item \textbf{Why it matters:}
+    \begin{itemize}
+        \item [原因1 — 政策/实践意义]
+        \item [原因2 — 学术空白]
+    \end{itemize}
+    \vspace{1em}
+    \item \textbf{What we find:} [一句话核心发现]
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Contribution}
+\begin{enumerate}
+    \item \textbf{[贡献1]:} [简要说明]
+    \item \textbf{[贡献2]:} [简要说明]
+    \item \textbf{[贡献3]:} [简要说明]
+\end{enumerate}
+
+\vspace{1em}
+\textbf{Related literature:} [Author1 (Year)]; [Author2 (Year)]; [Author3 (Year)]
+\end{frame}
+
+
+% ============================================================
+\section{Background}
+% ============================================================
+
+\begin{frame}{Institutional Background}
+\begin{columns}
+\column{0.55\textwidth}
+\begin{itemize}
+    \item [政策/制度描述]
+    \item [关键时间节点]
+    \item [适用范围]
+\end{itemize}
+
+\column{0.4\textwidth}
+% 可放政策时间线或示意图
+\begin{center}
+\textbf{Timeline}\\[0.5em]
+\begin{tabular}{ll}
+\toprule
+Date & Event \\
+\midrule
+[日期] & [事件1] \\
+[日期] & [事件2] \\
+[日期] & [事件3] \\
+\bottomrule
+\end{tabular}
+\end{center}
+\end{columns}
+\end{frame}
+
+
+% ============================================================
+\section{Data \& Strategy}
+% ============================================================
+
+\begin{frame}{Data}
+\begin{itemize}
+    \item \textbf{Source:} [数据来源]
+    \item \textbf{Sample:} [样本描述]
+    \item \textbf{Period:} [时间范围]
+    \item \textbf{Key variables:}
+    \begin{itemize}
+        \item $Y$: [因变量]
+        \item $D$: [处理变量]
+        \item Controls: [控制变量]
+    \end{itemize}
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Empirical Strategy}
+\textbf{[方法名称]} (e.g., Difference-in-Differences)
+
+\vspace{0.5em}
+\begin{equation*}
+Y_{it} = \alpha_i + \delta_t + \beta(\text{Treat}_i \times \text{Post}_t) + X'_{it}\gamma + \varepsilon_{it}
+\end{equation*}
+
+\begin{itemize}
+    \item $\alpha_i$: entity fixed effects
+    \item $\delta_t$: time fixed effects
+    \item $\beta$: \textcolor{accentred}{\textbf{coefficient of interest}} — [经济含义]
+    \item SE clustered at [层级] level
+\end{itemize}
+
+\vspace{0.5em}
+\textbf{Identification assumption:} [平行趋势/排他性等]
+\end{frame}
+
+
+% ============================================================
+\section{Results}
+% ============================================================
+
+\begin{frame}{Main Results}
+\begin{table}
+\centering
+\small
+\caption{[表标题]}
+\begin{tabular}{lccc}
+\toprule
+ & (1) & (2) & (3) \\
+\midrule
+Treat $\times$ Post & [coef]*** & [coef]*** & [coef]*** \\
+ & ([se]) & ([se]) & ([se]) \\
+\midrule
+Controls & No & Yes & Yes \\
+Entity FE & Yes & Yes & Yes \\
+Year FE & Yes & Yes & Yes \\
+Obs. & [N] & [N] & [N] \\
+\bottomrule
+\end{tabular}
+\end{table}
+{\small \textit{Notes: Clustered SE in parentheses. *** $p<0.01$}}
+\end{frame}
+
+\begin{frame}{Event Study / Parallel Trends}
+\begin{figure}
+\centering
+\includegraphics[width=0.8\textwidth]{figures/fig2_event_study.png}
+\caption{Dynamic Treatment Effects}
+\end{figure}
+{\small Pre-trend coefficients jointly insignificant ($F = [X.XX]$, $p = [X.XX]$)}
+\end{frame}
+
+\begin{frame}{Robustness}
+\begin{itemize}
+    \item \textcolor{green!50!black}{\checkmark} \textbf{Placebo test:} [结果]
+    \item \textcolor{green!50!black}{\checkmark} \textbf{Alternative control group:} [结果]
+    \item \textcolor{green!50!black}{\checkmark} \textbf{Alternative DV:} [结果]
+    \item \textcolor{green!50!black}{\checkmark} \textbf{Different clustering:} [结果]
+\end{itemize}
+\vspace{0.5em}
+$\Rightarrow$ Results robust across all specifications
+\end{frame}
+
+\begin{frame}{Heterogeneity}
+\begin{columns}
+\column{0.5\textwidth}
+\textbf{By [维度1]:}
+\begin{itemize}
+    \item [子组A]: $\beta = [X]$***
+    \item [子组B]: $\beta = [X]$ (n.s.)
+\end{itemize}
+
+\column{0.5\textwidth}
+\textbf{By [维度2]:}
+\begin{itemize}
+    \item [子组C]: $\beta = [X]$***
+    \item [子组D]: $\beta = [X]$*
+\end{itemize}
+\end{columns}
+
+\vspace{1em}
+\textbf{Interpretation:} [异质性的经济解释]
+\end{frame}
+
+
+% ============================================================
+\section{Conclusion}
+% ============================================================
+
+\begin{frame}{Conclusion}
+\begin{enumerate}
+    \item \textbf{Finding:} [核心发现]
+    \vspace{0.5em}
+    \item \textbf{Mechanism:} [机制/渠道]
+    \vspace{0.5em}
+    \item \textbf{Policy implication:} [政策建议]
+    \vspace{0.5em}
+    \item \textbf{Limitation:} [主要局限]
+\end{enumerate}
+
+\vspace{1em}
+\centering
+\Large Thank you! \\
+\normalsize [邮箱]
+\end{frame}
+
+
+% ============================================================
+% 附录
+% ============================================================
+\appendix
+
+\begin{frame}[noframenumbering]{Appendix: Additional Results}
+[备用幻灯片，应对提问]
+\end{frame}
+
+\end{document}
