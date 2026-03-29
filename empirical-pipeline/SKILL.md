@@ -16,8 +16,54 @@ S1:DataAudit → S2:QuestionGen → ◆SELECT → S3:PreAnalysis → ◆CONFIRM
 ## Entry Points
 
 **A) Has data file** → Start Stage 1
-**B) Has topic, no data** → Start Stage 2 (先用 `skills/data-fetcher` 搜索公开数据源)
-**C) Mid-stream** → Ask user's current progress, jump to matching stage
+**B) Has topic, no data** → Start Stage 0 (需求诊断)
+**C) Has Research Prompt** → Start Stage 3 (跳过 Stage 0-2)
+**D) Has specific task** → 直接调用对应 skill（如 "帮我跑个 DID"）
+**E) Mid-stream** → Ask user's current progress, jump to matching stage
+
+---
+
+## Stage 0: 需求诊断（Intake Interview）
+
+Goal: 当用户给出模糊的研究 idea 时，通过结构化提问将其转化为可执行的研究设计。
+
+**触发条件：** 用户输入不包含具体数据、明确方法或完整研究设计。例如 "AI 对就业的影响"、"数字经济怎么研究"。
+
+**跳过条件：** 用户已上传数据（→ Stage 1）、已给出 Research Prompt（→ Stage 3）、已有明确任务（→ 对应 skill）。
+
+### 诊断问题（依次提问，不要一次全部抛出）
+
+**问题 1：研究对象**
+
+> 你想研究的"影响"是哪个层面的？
+> - 劳动力市场（就业、工资、工时、岗位替代/互补）
+> - 企业生产效率（TFP、创新产出、成本结构）
+> - 公共服务与治理（行政效率、公共服务质量、政策执行）
+> - 学术研究生产（论文产出、研究质量、学术伦理）
+> - 其他（请说明）
+
+**问题 2：数据来源**
+
+> 你倾向用什么数据？
+> - 公开宏观数据（跨国/跨省面板，我可以从 FRED/World Bank/国统局直接拉取）
+> - 企业微观数据（上市公司年报、工商数据，需要 CSMAR/CNRDS 等账号）
+> - 调查/问卷数据（CFPS、CGSS、CHFS，或自己设计的调查）
+> - 先帮我找合适的数据（我来建议可用的公开数据源）
+
+**问题 3：输出形式**
+
+> 你更想要哪种输出？
+> - 完整 Research Prompt（APE 风格的研究设计方案，可拿去 Claude Code 跑完整论文）
+> - 直接跑到出结果（用公开数据直接执行分析，输出图表和初稿）
+> - 先做可行性评估（评估数据可得性、识别策略可信度、发表潜力）
+
+### 诊断后路由
+
+根据用户回答，生成 1-3 个具体研究方向建议（含推荐方法和数据），然后：
+- 用户选定方向 → 进入 Stage 2（研究问题生成）
+- 用户要 Research Prompt → 生成完整 prompt 后结束
+- 用户要可行性评估 → 生成评估报告后结束
+- 用户要直接跑 → 先用 `skills/data-fetcher` 拉数据，再进入 Stage 1
 
 ---
 

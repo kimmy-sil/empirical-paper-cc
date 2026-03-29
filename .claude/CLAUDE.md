@@ -9,7 +9,7 @@
 统一编排 8 个阶段，带人工决策门。适合从零开始一篇完整论文。
 
 ```
-S1:DataAudit → S2:QuestionGen → ◆SELECT → S3:PreAnalysis → ◆CONFIRM
+S0:Intake → S1:DataAudit → S2:QuestionGen → ◆SELECT → S3:PreAnalysis → ◆CONFIRM
 → S4:Analysis → S5:Drafting → S6:Review → ◆APPROVE → S7:Finalize → S8:Beamer
 ```
 
@@ -53,8 +53,9 @@ S1:DataAudit → S2:QuestionGen → ◆SELECT → S3:PreAnalysis → ◆CONFIRM
 ## Routing Rules
 
 ### 全流程模式
+- 用户给出模糊 idea（如 "AI 对就业的影响"）→ Pipeline Stage 0（需求诊断）开始
 - 用户上传数据文件（CSV/Excel/Stata）→ Pipeline Stage 1 开始
-- 用户给出研究主题 → Pipeline Stage 2 开始，先用 `data-fetcher` 搜索数据源
+- 用户给出 Research Prompt → Pipeline Stage 3 开始
 - 用户已有初稿 → 跳至 Pipeline Stage 6
 
 ### 单模块模式
