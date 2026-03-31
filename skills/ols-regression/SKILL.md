@@ -458,3 +458,483 @@ output/
   ols_main_table.tex             # 主结果表（LaTeX）
   ols_robustness.csv             # 稳健性检验
 ```
+
+---
+
+### Section: Specification Curve Analysis
+
+穷举所有合理的控制变量组合（2^k种），把所有回归的核心系数画在一张图上，直观展示结论在不同规格下的稳健性。
+
+#### R代码（specr包）
+
+```r
+# R: Specification Curve Analysis
+# install.packages("specr")
+library(specr)
+library(ggplot2)
+library(dplyr)
+
+# Step 1: 定义规格空间
+# y：因变量（可多个）
+# x：核心解释变量（可多个）
+# controls：候选控制变量（2^k种组合）
+# model：估计方法
+
+specs <- setup(
+  data     = df,
+  y        = c("y"),                                  # 因变量
+  x        = c("x1"),                                 # 核心解释变量
+  model    = c("lm"),                                 # 估计方法（"lm", "glm"等）
+  controls = c("control1", "control2", "control3",    # 候选控制变量（穷举组合）
+               "control4"),
+  add_to_formula = "| entity_id + year"               # 固定效应（可选）
+)
+
+# Step 2: 运行所有规格
+results <- run_specs(
+  specs      = specs,
+  .progress  = TRUE                                   # 显示进度
+)
+
+# Step 3: 汇总结果
+summary(results)
+# 关键看：核心系数的中位数、方向一致性、显著比例
+
+# Step 4: Specification Curve图
+p <- plot_specs(
+  results,
+  choices     = c("controls"),                        # 显示控制变量选择
+  rel_heights = c(1, 2),                              # 上下图比例
+  desc        = FALSE                                 # 按系数大小排序
+)
+ggsave("output/specification_curve.png", p, width = 12, height = 8, dpi = 300)
+
+# Step 5: 统计摘要
+cat("规格总数:", nrow(results), "\n")
+cat("系数中位数:", median(results$estimate), "\n")
+cat("系数方向一致性:", mean(results$estimate > 0), "\n")
+cat("统计显著比例(p<0.05):", mean(results$p.value < 0.05), "\n")
+
+# Step 6: 自定义多面板图（更美观）
+# 上图：所有规格的系数+置信区间
+# 下图：对应的控制变量选择矩阵
+plot_specs(results,
+           choices  = c("controls", "model"),
+           ci       = TRUE,
+           ribbon   = TRUE)
+```
+
+#### Python代码（循环 + matplotlib图）
+
+```python
+# Python: Specification Curve Analysis（手动穷举）
+import itertools
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.gridspec as gridspec
+import statsmodels.formula.api as smf
+from tqdm import tqdm
+
+# 定义候选控制变量
+candidate_controls = ['control1', 'control2', 'control3', 'control4']
+core_var = 'x1'
+outcome  = 'y'
+
+# 穷举所有控制变量组合（2^k种）
+all_specs = []
+for k in range(len(candidate_controls) + 1):
+    for combo in itertools.combinations(candidate_controls, k):
+        all_specs.append(list(combo))
+
+print(f"总规格数: {len(all_specs)}")
+
+# 运行所有规格
+results = []
+for controls in tqdm(all_specs):
+    formula_parts = [core_var] + controls
+    formula = f"{outcome} ~ {' + '.join(formula_parts)}"
+    try:
+        res = smf.ols(formula, data=df).fit(cov_type='HC3')
+        results.append({
+            'controls':  tuple(controls),
+            'n_controls': len(controls),
+            'coef':  res.params[core_var],
+            'se':    res.bse[core_var],
+            'ci_low': res.conf_int().loc[core_var, 0],
+            'ci_high': res.conf_int().loc[core_var, 1],
+            'pval':  res.pvalues[core_var],
+            'r2':    res.rsquared,
+            'n':     int(res.nobs),
+            **{f'has_{c}': (c in controls) for c in candidate_controls}
+        })
+    except Exception as e:
+        continue
+
+df_spec = pd.DataFrame(results).sort_values('coef').reset_index(drop=True)
+
+# ============================================================
+# 绘制Specification Curve图
+# ============================================================
+fig = plt.figure(figsize=(14, 9))
+gs  = gridspec.GridSpec(2, 1, height_ratios=[2, 1], hspace=0.05)
+
+ax1 = fig.add_subplot(gs[0])
+ax2 = fig.add_subplot(gs[1])
+
+# 上图：系数+置信区间
+colors = ['#2196F3' if p < 0.05 else '#BBDEFB' for p in df_spec['pval']]
+ax1.scatter(range(len(df_spec)), df_spec['coef'], c=colors, s=15, zorder=3)
+ax1.fill_between(range(len(df_spec)), df_spec['ci_low'], df_spec['ci_high'],
+                 alpha=0.2, color='#2196F3')
+ax1.axhline(0, color='red', linestyle='--', linewidth=1, alpha=0.7)
+ax1.set_ylabel(f'{core_var} 系数', fontsize=11)
+ax1.set_title('Specification Curve Analysis', fontsize=13, fontweight='bold')
+ax1.set_xlim(-0.5, len(df_spec) - 0.5)
+
+# 统计标注
+sig_pct = mean(df_spec['pval'] < 0.05) * 100
+pos_pct = mean(df_spec['coef'] > 0) * 100
+ax1.text(0.02, 0.95, f"显著(p<0.05): {sig_pct:.0f}% | 正向: {pos_pct:.0f}%",
+         transform=ax1.transAxes, fontsize=9, va='top',
+         bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.7))
+
+# 下图：控制变量选择矩阵
+for i, ctrl in enumerate(candidate_controls):
+    col_name = f'has_{ctrl}'
+    y_pos    = len(candidate_controls) - 1 - i
+    for j, has_it in enumerate(df_spec[col_name]):
+        ax2.scatter(j, y_pos, color='#1976D2' if has_it else '#E0E0E0',
+                    s=8, marker='s')
+
+ax2.set_yticks(range(len(candidate_controls)))
+ax2.set_yticklabels(candidate_controls[::-1], fontsize=9)
+ax2.set_xlim(-0.5, len(df_spec) - 0.5)
+ax2.set_xlabel('规格排序（按系数大小）', fontsize=10)
+ax2.tick_params(axis='x', which='both', bottom=False, labelbottom=False)
+
+plt.savefig('output/specification_curve.png', dpi=300, bbox_inches='tight')
+plt.close()
+print(f"规格曲线图已保存")
+print(df_spec[['coef','se','pval','r2']].describe().round(4))
+```
+
+---
+
+### Section: Oster (2019) 系数稳定性检验
+
+Oster (2019) 检验遗漏变量偏误的方法：通过计算δ值（bias-adjusted coefficient），衡量"遗漏变量需要多强才能推翻结论"。
+
+**核心逻辑：**
+- $\tilde{\beta}$：加入控制变量后的系数
+- $\dot{\beta}$：仅有核心变量的系数
+- δ：遗漏变量需要与处理变量的相关程度（相对于控制变量）才能使真实效应为0
+- **若 δ > 1 → 结论稳健**（遗漏变量需比已有控制变量与处理变量的相关性还强，才能推翻结论）
+
+**R²_max设定原则：**
+- 通常取 1.3 × R²_controlled（Oster 2019建议）
+- 或取理论上界（如 R²=0.9，因变量不可能被完美解释）
+- 敏感性分析中尝试多个R²_max值
+
+#### R代码（手动计算）
+
+```r
+# R: Oster (2019) 系数稳定性检验
+# 参考 Stata psacalc 的逻辑
+
+#' Oster (2019) δ系数计算
+#' @param beta_restricted  仅有核心变量X的系数
+#' @param beta_controlled  加入控制变量后的系数
+#' @param r2_restricted    仅有核心变量X的R²
+#' @param r2_controlled    加入控制变量后的R²
+#' @param r2_max           R²上界（默认1.3 × r2_controlled）
+#' @param beta_null        原假设下的系数（通常=0）
+#' @return δ值
+
+oster_delta <- function(beta_restricted,
+                        beta_controlled,
+                        r2_restricted,
+                        r2_controlled,
+                        r2_max = NULL,
+                        beta_null = 0) {
+  if (is.null(r2_max)) {
+    r2_max <- min(1.3 * r2_controlled, 0.99)  # Oster建议 + 上限1
+  }
+
+  # Oster (2019) 公式
+  # δ = (β_controlled - β_null) / (β_restricted - β_controlled)
+  #     × (R²_max - R²_controlled) / (R²_controlled - R²_restricted)
+
+  delta <- ((beta_controlled - beta_null) / (beta_restricted - beta_controlled)) *
+            ((r2_max - r2_controlled) / (r2_controlled - r2_restricted))
+
+  return(delta)
+}
+
+# ============================================================
+# 使用示例
+# ============================================================
+library(fixest)
+
+# 跑两个规格
+res_restricted <- feols(y ~ x1, data = df, vcov = "hetero")
+res_controlled <- feols(y ~ x1 + control1 + control2 + control3,
+                        data = df, vcov = "hetero")
+
+# 提取所需数值
+b_res  <- coef(res_restricted)["x1"]
+b_ctrl <- coef(res_controlled)["x1"]
+r2_res  <- r2(res_restricted)["r2"]
+r2_ctrl <- r2(res_controlled)["r2"]
+
+# 计算δ（三种R²_max假设）
+r2_max_vals <- c(
+  "1.3×R²_ctrl" = 1.3 * r2_ctrl,
+  "1.5×R²_ctrl" = 1.5 * r2_ctrl,
+  "理论上界0.9"  = 0.9
+)
+
+cat("=== Oster (2019) 系数稳定性检验 ===\n")
+cat(sprintf("仅含X的系数 (β_res):  %.4f  R²: %.4f\n", b_res, r2_res))
+cat(sprintf("含控制变量系数 (β_ctrl): %.4f  R²: %.4f\n", b_ctrl, r2_ctrl))
+cat(sprintf("系数变化幅度: %.1f%%\n", abs(b_ctrl - b_res) / abs(b_res) * 100))
+cat("\nδ值（遗漏变量强度倍数）：\n")
+
+for (name in names(r2_max_vals)) {
+  delta <- oster_delta(b_res, b_ctrl, r2_res, r2_ctrl, r2_max_vals[name])
+  flag  <- if (delta > 1) "✓ 稳健" else "⚠️ 需关注"
+  cat(sprintf("  R²_max = %s: δ = %.3f  → %s\n", name, delta, flag))
+}
+
+cat("\n解读：若δ > 1 → 遗漏变量需比现有控制变量更强才能推翻结论\n")
+
+# ============================================================
+# bias-adjusted系数（β*）
+# ============================================================
+# 若δ=1（假设遗漏变量偏误与观测到的偏误等强），β*是多少？
+
+beta_star <- function(b_res, b_ctrl, r2_res, r2_ctrl, r2_max, delta = 1) {
+  # 当δ=1时求解β_null（即bias-adjusted coefficient）
+  # 公式变形：β* = β_ctrl - delta × (β_res - β_ctrl) × (R²_max - R²_ctrl)/(R²_ctrl - R²_res)
+  b_star <- b_ctrl - delta * (b_res - b_ctrl) *
+              (r2_max - r2_ctrl) / (r2_ctrl - r2_res)
+  return(b_star)
+}
+
+b_star <- beta_star(b_res, b_ctrl, r2_res, r2_ctrl, 1.3 * r2_ctrl)
+cat(sprintf("\nbias-adjusted β*(δ=1, R²_max=1.3×R²_ctrl): %.4f\n", b_star))
+cat(sprintf("（若β*与0同号且显著，结论更稳健）\n"))
+```
+
+---
+
+### Section: 经济显著性三层解读
+
+统计显著性（p值）≠ 经济显著性。必须同时报告实际效应大小。
+
+#### 第一层：基础换算（标准差单位效应）
+
+$$\text{标准化效应} = \frac{\hat{\beta} \times SD(X)}{Mean(Y)} \times 100\%$$
+
+即：X增加1个标准差，Y相对于其均值变化多少百分比。
+
+#### 第二层：文献对比
+
+提供参考框架，帮助读者判断效应是否合理。例如："同类DID研究中政策效果一般在3-8%之间，本文估计的4.2%处于正常区间。"
+
+#### 第三层：政策换算（如适用）
+
+将系数换算为可操作的政策含义。例如："每增加1单位政策投入，对应产出增加X万元，投入产出比为Y。"
+
+#### 自动计算代码模板
+
+```python
+# Python: 经济显著性三层解读自动计算
+import numpy as np
+import pandas as pd
+
+def economic_significance(
+    coef,           # OLS系数
+    se,             # 标准误
+    x_std,          # 自变量标准差
+    y_mean,         # 因变量均值
+    y_std,          # 因变量标准差
+    variable_name="X",
+    outcome_name="Y",
+    literature_range=None,  # 文献中效应范围 (min, max) %
+    policy_cost=None,       # 每单位政策成本（如元）
+    policy_unit="元"
+):
+    """经济显著性三层解读"""
+    print(f"{'='*50}")
+    print(f"经济显著性解读: {variable_name} → {outcome_name}")
+    print(f"{'='*50}")
+
+    # 第一层：标准差单位效应
+    effect_1sd = coef * x_std
+    effect_1sd_pct = effect_1sd / y_mean * 100
+
+    print(f"\n【第一层：标准差单位效应】")
+    print(f"  系数 β = {coef:.4f}")
+    print(f"  {variable_name} 标准差 = {x_std:.4f}")
+    print(f"  β × SD({variable_name}) = {effect_1sd:.4f}")
+    print(f"  → {variable_name}增加1个标准差，{outcome_name}变化: {effect_1sd:.4f}")
+    print(f"  → 相当于{outcome_name}均值的 {effect_1sd_pct:.1f}%")
+
+    # 标准化效应（Cohen's d类比）
+    effect_std = coef * x_std / y_std
+    print(f"  → 标准化效应 = {effect_std:.3f} 个{outcome_name}标准差")
+
+    # 第二层：文献对比
+    print(f"\n【第二层：文献对比】")
+    if literature_range:
+        lo, hi = literature_range
+        in_range = lo <= effect_1sd_pct <= hi
+        print(f"  文献参考区间: [{lo}%, {hi}%]")
+        print(f"  本文估计: {effect_1sd_pct:.1f}%")
+        status = "在文献区间内 ✓" if in_range else "超出文献区间，需解释 ⚠️"
+        print(f"  → {status}")
+    else:
+        print(f"  （请填入同类文献的效应范围作为参照）")
+
+    # 第三层：政策换算
+    print(f"\n【第三层：政策换算】")
+    if policy_cost is not None:
+        output_per_unit = coef * policy_cost
+        print(f"  每投入 1{policy_unit} 政策成本")
+        print(f"  → {outcome_name}变化: {output_per_unit:.4f}")
+        print(f"  → 投入产出比: 1:{abs(output_per_unit):.2f}")
+    else:
+        print(f"  （如适用：填入政策成本进行换算）")
+
+    print(f"\n{'='*50}")
+    return {
+        'coef': coef, 'effect_1sd': effect_1sd,
+        'effect_pct': effect_1sd_pct, 'effect_std': effect_std
+    }
+
+# 使用示例
+econ_result = economic_significance(
+    coef          = 0.045,      # β系数
+    se            = 0.012,
+    x_std         = df['x1'].std(),
+    y_mean        = df['y'].mean(),
+    y_std         = df['y'].std(),
+    variable_name = "数字化水平",
+    outcome_name  = "企业绩效",
+    literature_range = (2, 8),  # 文献中2-8%
+    policy_cost   = 10000,      # 每万元补贴
+    policy_unit   = "万元"
+)
+```
+
+```r
+# R: 经济显著性三层解读
+economic_significance_r <- function(
+  model,              # lm或feols对象
+  x_var,              # 核心解释变量名
+  data,               # 原始数据框
+  y_var,              # 因变量名
+  literature_range = NULL,
+  policy_cost = NULL,
+  policy_unit = "元"
+) {
+  coef_val <- coef(model)[x_var]
+  se_val   <- sqrt(vcov(model)[x_var, x_var])
+
+  x_std  <- sd(data[[x_var]], na.rm = TRUE)
+  y_mean <- mean(data[[y_var]], na.rm = TRUE)
+  y_std  <- sd(data[[y_var]], na.rm = TRUE)
+
+  effect_1sd     <- coef_val * x_std
+  effect_1sd_pct <- effect_1sd / y_mean * 100
+  effect_std_    <- effect_1sd / y_std
+
+  cat("=== 经济显著性解读 ===\n")
+  cat(sprintf("系数 β = %.4f (SE=%.4f)\n", coef_val, se_val))
+  cat(sprintf("\n【第一层】X增加1SD → Y变化 %.4f (均值的 %.1f%%，SD的 %.3f)\n",
+              effect_1sd, effect_1sd_pct, effect_std_))
+
+  if (!is.null(literature_range)) {
+    in_range <- effect_1sd_pct >= literature_range[1] & effect_1sd_pct <= literature_range[2]
+    cat(sprintf("\n【第二层】文献区间[%g%%, %g%%]，本文 %.1f%% → %s\n",
+                literature_range[1], literature_range[2],
+                effect_1sd_pct, if(in_range) "在区间内 ✓" else "超出区间 ⚠️"))
+  }
+
+  if (!is.null(policy_cost)) {
+    cat(sprintf("\n【第三层】每投入1%s → Y变化 %.4f（投入产出比 1:%.2f）\n",
+                policy_unit, coef_val * policy_cost, abs(coef_val * policy_cost)))
+  }
+}
+
+# 使用示例
+economic_significance_r(res_controlled, "x1", df, "y",
+                        literature_range = c(2, 8),
+                        policy_cost = 10000, policy_unit = "万元")
+```
+
+---
+
+### Section: OLS Estimand声明
+
+| 设定 | Estimand | 声明要求 |
+|------|---------|---------|
+| OLS+控制变量（同质效应假设） | ATE（平均处理效应） | 需论证效应为何可视为同质（如RCT或强可信的CIA） |
+| OLS+控制变量（异质效应） | 处理方差加权平均≠ATE | 标注这**不是**ATE，如需ATE建议IPW/matching |
+| OLS作为基准（描述性） | 条件相关系数 | 明确声明非因果，仅描述性 |
+
+**声明模板（论文正文方法节）：**
+
+```
+本文OLS估计的核心系数为处理变量X的条件均值效应。
+在效应同质性假设下，该系数可解释为平均处理效应（ATE）。
+然而，若效应存在异质性，OLS系数为处理方差加权平均，
+可能偏离ATE（Angrist and Pischke, 2009）。
+为此，第X节提供基于IPW的ATE估计作为稳健性检验。
+```
+
+---
+
+### Section: 错误补充
+
+**⚠️ 错误8（新增）："默认OLS系数=ATE"**
+
+**错误表现：** 直接将OLS系数报告为"政策的平均处理效应（ATE）"，未说明效应同质性假设。
+
+**为何错误：** 在异质效应下，OLS系数是**处理方差加权平均**（treatment-variance weighted average），数学上等价于：
+
+$$\hat{\beta}_{OLS} = \frac{\sum_i (X_i - \bar{X})^2 \cdot \tau_i}{\sum_i (X_i - \bar{X})^2}$$
+
+其中 $\tau_i$ 是个体处理效应。权重取决于处理强度的方差，而非个体的代表性，**不等于**真正的ATE。
+
+**正确做法：**
+- 若确信效应同质（如RCT），明确声明并解释理由
+- 若可能存在异质效应，标注系数是"处理方差加权平均"
+- 如需ATE，使用IPW（逆概率加权）或matching方法
+
+```r
+# R: IPW估计ATE（与OLS对比）
+library(WeightIt)
+
+# 估计倾向得分并计算IPW权重
+w_out <- weightit(
+  x1 ~ control1 + control2 + control3,
+  data   = df,
+  method = "ps",      # 倾向得分加权
+  estimand = "ATE"    # 目标：ATE（非ATT）
+)
+summary(w_out)
+
+# 用IPW权重做加权回归
+library(survey)
+svy_design <- svydesign(ids = ~1, data = df, weights = w_out$weights)
+res_ipw <- svyglm(y ~ x1, design = svy_design)
+summary(res_ipw)
+
+# 对比OLS vs IPW
+cat("\n=== OLS vs IPW ATE 对比 ===\n")
+cat(sprintf("OLS系数（处理方差加权平均）: %.4f\n", coef(res_controlled)["x1"]))
+cat(sprintf("IPW系数（ATE）: %.4f\n", coef(res_ipw)["x1"]))
+cat("差异越大 → 效应异质性越强，OLS越偏离ATE\n")
+```

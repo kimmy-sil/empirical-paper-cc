@@ -464,3 +464,389 @@ drop _merge
   - 剔除主要变量缺失                        N = 31,400
 最终样本                                   N = 31,400
 ```
+
+---
+
+### Section: 缺失机制诊断框架
+
+决策树：
+```
+缺失值 → 判断缺失机制
+├── MCAR（完全随机）→ Little's MCAR检验（R代码: naniar::mcar_test / Python: missingno）
+│   └── 检验通过 → 直接用非平衡面板，FE没问题
+├── MAR（与可观测变量相关）→ 控制相关变量后用非平衡面板
+│   └── 或用MICE多重插补
+└── MNAR（与不可观测因素相关）→ Heckman两阶段纠正
+```
+
+#### Little's MCAR检验 R代码
+
+```r
+# R: naniar包 Little's MCAR检验
+library(naniar)
+
+# Little's MCAR检验
+# H0: 缺失完全随机（MCAR）
+# p > 0.05 → 不能拒绝MCAR → 可直接用非平衡面板
+mcar_result <- mcar_test(df)
+print(mcar_result)
+# 输出: statistic（卡方统计量）, df（自由度）, p.value
+
+# 可视化缺失模式
+vis_miss(df)                  # 全数据缺失热图
+gg_miss_var(df)               # 各变量缺失比例条形图
+gg_miss_upset(df)             # UpSet图（缺失组合模式）
+
+# 按组检验是否MCAR
+df %>%
+  group_by(year) %>%
+  summarise(
+    miss_x1 = mean(is.na(x1)),
+    miss_x2 = mean(is.na(x2))
+  ) %>%
+  print()
+# 若缺失率随时间系统性变化 → 非MCAR
+```
+
+#### Python missingno可视化
+
+```python
+# Python: missingno缺失可视化
+import missingno as msno
+import matplotlib.pyplot as plt
+
+# 矩阵图（白条=缺失，黑条=存在）
+msno.matrix(df, figsize=(12, 6), sparkline=True)
+plt.savefig("output/figures/missing_matrix.png", dpi=300, bbox_inches='tight')
+
+# 条形图（各变量完整性比例）
+msno.bar(df, figsize=(12, 5))
+plt.savefig("output/figures/missing_bar.png", dpi=300, bbox_inches='tight')
+
+# 热力图（缺失模式相关性：两变量是否同时缺失）
+msno.heatmap(df, figsize=(10, 8))
+plt.savefig("output/figures/missing_heatmap.png", dpi=300, bbox_inches='tight')
+
+# 树状图（层级聚类缺失模式）
+msno.dendrogram(df, figsize=(10, 5))
+plt.savefig("output/figures/missing_dendrogram.png", dpi=300, bbox_inches='tight')
+
+# 辅助检验：缺失是否与观测变量相关（MAR检验思路）
+import pandas as pd
+import scipy.stats as stats
+
+for col in df.columns:
+    if df[col].isnull().sum() > 0:
+        miss_flag = df[col].isnull().astype(int)
+        for other_col in df.select_dtypes(include='number').columns:
+            if other_col != col and df[other_col].notnull().all():
+                t_stat, p_val = stats.ttest_ind(
+                    df.loc[miss_flag == 1, other_col],
+                    df.loc[miss_flag == 0, other_col],
+                    nan_policy='omit'
+                )
+                if p_val < 0.05:
+                    print(f"{col}的缺失与{other_col}显著相关(p={p_val:.3f}) → 可能为MAR")
+```
+
+---
+
+### Section: Heckman两阶段选择模型
+
+适用场景：因变量存在样本选择偏误（MNAR），如只有特定企业才被观测到/参与某项目。
+
+#### 第一阶段：Probit模型 → 计算逆米尔斯比（IMR）
+
+$$P(S_i = 1 | Z_i) = \Phi(Z_i' \gamma)$$
+
+逆米尔斯比（Inverse Mills Ratio）：
+$$\lambda_i = \frac{\phi(Z_i' \hat{\gamma})}{\Phi(Z_i' \hat{\gamma})}$$
+
+- $\phi$：标准正态PDF
+- $\Phi$：标准正态CDF
+- $Z_i$：选择方程的工具变量（需包含至少一个排他性变量）
+
+#### 第二阶段：将IMR纳入主回归
+
+$$Y_i = X_i' \beta + \rho \sigma \lambda_i + u_i$$
+
+若 $\rho \sigma \lambda_i$ 系数显著 → 存在选择偏误，Heckman纠正必要。
+
+#### Python代码（statsmodels Heckman）
+
+```python
+# Python: Heckman两阶段选择模型
+import statsmodels.api as sm
+from scipy.stats import norm
+import pandas as pd
+import numpy as np
+
+# ============================================================
+# 方法A：手动两阶段（便于理解和调试）
+# ============================================================
+
+# 数据准备
+# select_vars: 选择方程的解释变量（含排他性变量）
+# outcome_vars: 主方程的解释变量
+
+# 第一阶段：Probit（因变量=是否被观测/参与）
+probit_model = sm.Probit(
+    df['selected'],                         # 1=被观测，0=未被观测
+    sm.add_constant(df[select_vars])
+)
+probit_res = probit_model.fit()
+print("第一阶段Probit结果:")
+print(probit_res.summary())
+
+# 计算逆米尔斯比（IMR）
+xb = probit_res.fittedvalues                # 线性预测值
+phi = norm.pdf(xb)                          # 标准正态PDF
+Phi = norm.cdf(xb)                          # 标准正态CDF
+
+# 只对被选择样本计算IMR
+df['imr'] = np.where(df['selected'] == 1, phi / Phi, np.nan)
+
+# 第二阶段：OLS（仅使用被观测样本，加入IMR）
+df_selected = df[df['selected'] == 1].copy()
+ols_model = sm.OLS(
+    df_selected['y'],
+    sm.add_constant(df_selected[outcome_vars + ['imr']])
+)
+ols_res = ols_model.fit()
+print("\n第二阶段OLS结果（含IMR）:")
+print(ols_res.summary())
+
+# 解读：若imr系数显著，说明存在样本选择偏误
+imr_coef = ols_res.params['imr']
+imr_pval = ols_res.pvalues['imr']
+print(f"\nIMR系数: {imr_coef:.4f}, p值: {imr_pval:.4f}")
+if imr_pval < 0.05:
+    print("⚠️ 选择偏误显著，Heckman纠正有必要")
+else:
+    print("✓ 选择偏误不显著，OLS估计可信")
+
+# ============================================================
+# 方法B：使用heckman包（需pip install heckman）
+# ============================================================
+# pip install heckman
+from heckman import Heckman
+
+heck_model = Heckman(
+    df['y'],
+    df[outcome_vars],
+    df[select_vars]
+)
+heck_res = heck_model.fit(method='twostep')
+print(heck_res.summary())
+```
+
+#### R代码（sampleSelection包）
+
+```r
+# R: Heckman两阶段选择模型
+library(sampleSelection)
+library(dplyr)
+
+# ============================================================
+# 方法A：sampleSelection包（推荐）
+# ============================================================
+
+# 构建Heckman选择模型
+# 公式：选择方程 | 主方程
+# 选择方程需包含至少一个排他性变量（exclusion restriction）
+
+heck_model <- selection(
+  selection = selected ~ z1 + z2 + exclusion_var,  # 第一阶段（含排他性变量）
+  outcome   = y ~ x1 + x2 + x3,                   # 第二阶段（主方程）
+  data      = df,
+  method    = "2step"                               # 两步法（或"ml"极大似然）
+)
+summary(heck_model)
+
+# 提取逆米尔斯比
+df$imr_samplesel <- heck_model$imratio
+
+# 检验选择偏误显著性
+# 查看summary中 "Inverse Mills Ratio" 的系数和p值
+
+# ============================================================
+# 方法B：手动两阶段（便于理解）
+# ============================================================
+library(sampleSelection)
+
+# 第一阶段：Probit
+probit_res <- glm(
+  selected ~ z1 + z2 + exclusion_var,
+  family = binomial(link = "probit"),
+  data   = df
+)
+
+# 计算IMR
+xb  <- predict(probit_res, type = "link")
+phi <- dnorm(xb)
+Phi <- pnorm(xb)
+df$imr <- phi / Phi
+
+# 第二阶段：OLS（仅选择样本）
+df_sel <- df %>% filter(selected == 1)
+ols_res2 <- lm(y ~ x1 + x2 + x3 + imr, data = df_sel)
+summary(ols_res2)
+
+# 注意：手动两步法标准误需要纠正（使用sampleSelection包自动纠正）
+# 建议用sampleSelection::selection()获取正确标准误
+
+# ============================================================
+# 排他性约束验证（Exclusion Restriction检验）
+# ============================================================
+# 排他性变量条件：
+# 1. 与选择（selected）相关（Probit中显著）
+# 2. 与结果（y）无直接关系（仅通过选择影响y）
+
+# 检验1：第一阶段中排他性变量显著性
+cat("排他性变量在第一阶段的显著性:\n")
+print(summary(probit_res)$coefficients["exclusion_var", ])
+
+# 检验2：加入排他性变量后主方程系数变化（理论上不变）
+ols_with_excl <- lm(y ~ x1 + x2 + x3 + exclusion_var, data = df_sel)
+cat("\n排他性变量在主方程中（应不显著）:\n")
+print(summary(ols_with_excl)$coefficients["exclusion_var", ])
+```
+
+---
+
+### Section: 平衡vs非平衡面板决策树
+
+```
+估计方法对面板结构的要求：
+├── FE / RE → 非平衡面板可用
+├── 事件研究 → 需要事件窗口内连续观测
+├── 差分GMM → 接近平衡
+└── 系统GMM → 强烈建议平衡面板
+稳健性做法：主回归用非平衡面板，稳健性用平衡面板对比
+```
+
+#### 诊断与决策代码
+
+```r
+# R: 面板平衡性诊断与处理
+library(dplyr)
+library(plm)
+
+# Step 1: 诊断面板结构
+panel_summary <- df %>%
+  group_by(entity_id) %>%
+  summarise(
+    n_obs  = n(),
+    t_min  = min(year),
+    t_max  = max(year),
+    t_span = t_max - t_min + 1,
+    t_gap  = t_span - n_obs  # >0 说明有缺口
+  )
+
+cat("面板平衡性概况:\n")
+cat("  总个体数:", n_distinct(df$entity_id), "\n")
+cat("  平衡个体数:", sum(panel_summary$n_obs == max(panel_summary$n_obs)), "\n")
+cat("  有缺口个体数:", sum(panel_summary$t_gap > 0), "\n")
+cat("  缺失率:", mean(panel_summary$t_gap > 0) * 100, "%\n")
+
+# Step 2: 根据方法要求决策
+T_total <- n_distinct(df$year)
+
+# 构造平衡面板（用于稳健性对比）
+balanced_ids <- panel_summary %>%
+  filter(n_obs == T_total) %>%
+  pull(entity_id)
+df_balanced <- df %>% filter(entity_id %in% balanced_ids)
+
+cat("\n主回归（非平衡面板）N:", nrow(df), "\n")
+cat("稳健性（平衡面板）N:", nrow(df_balanced), "\n")
+cat("平衡面板保留比例:", nrow(df_balanced)/nrow(df) * 100, "%\n")
+
+# Step 3: 并行跑非平衡和平衡面板，对比系数
+library(fixest)
+res_unbalanced <- feols(y ~ x1 + x2 | entity_id + year, data = df,
+                        cluster = ~entity_id)
+res_balanced   <- feols(y ~ x1 + x2 | entity_id + year, data = df_balanced,
+                        cluster = ~entity_id)
+
+etable(res_unbalanced, res_balanced,
+       headers = c("非平衡面板（主回归）", "平衡面板（稳健性）"))
+# 若两者系数接近 → 选择性进入不严重
+```
+
+```python
+# Python: 面板平衡性快速诊断
+import pandas as pd
+
+def check_panel_balance(df, entity_col='entity_id', time_col='year'):
+    """诊断面板平衡性"""
+    obs_per_entity = df.groupby(entity_col)[time_col].count()
+    T_max = obs_per_entity.max()
+    T_min = obs_per_entity.min()
+
+    print(f"面板维度: N={df[entity_col].nunique()}, T_max={T_max}, T_min={T_min}")
+    print(f"平衡面板: {T_max == T_min}")
+    print(f"个体观测数分布:\n{obs_per_entity.value_counts().sort_index()}")
+
+    # 构造平衡子样本
+    balanced_ids = obs_per_entity[obs_per_entity == T_max].index
+    df_balanced  = df[df[entity_col].isin(balanced_ids)]
+    print(f"\n平衡面板保留: {len(balanced_ids)}/{df[entity_col].nunique()} 个体")
+    print(f"观测量: {len(df_balanced)}/{len(df)} ({len(df_balanced)/len(df)*100:.1f}%)")
+
+    return df_balanced
+
+df_balanced = check_panel_balance(df)
+```
+
+---
+
+### Section: 插值风险警告
+
+**三重警告（任何插值操作前必须阅读）：**
+
+#### 警告1：信息失真
+插值会平滑掉真实的波动。线性插值假设变量在缺失期间匀速变化，但现实中企业财务指标、宏观变量可能存在跳跃、波动或结构性转折。插值后的数据**会低估真实波动**，影响变量的标准差和相关结构。
+
+```python
+# 检验：插值前后变量波动性对比
+print("插值前后标准差对比:")
+print(f"  revenue（原始）: {df['revenue'].std():.4f}")
+print(f"  revenue_filled（插值后）: {df['revenue_filled'].std():.4f}")
+# 若插值后标准差显著小于原始 → 信息失真严重
+```
+
+#### 警告2：低估标准误
+填充数据减少样本变异，标准误被人为缩小。插值创造了"伪观测"，这些观测不携带独立信息，但回归程序会将其当做真实观测处理，导致：
+- 有效样本量被高估
+- 标准误被低估（过度拒绝H0）
+- 置信区间过窄
+
+**建议：** 若必须插值，在稳健性检验中使用原始非平衡面板对比结果。
+
+#### 警告3：引入测量误差
+- 对MAR（随机缺失）插值 → 可能引入新误差，尤其当预测模型不准确时
+- 对MNAR（非随机缺失）插值 → 会**加剧偏误**，因为缺失本身携带信息
+
+```r
+# R: 插值操作必须记录并在论文中声明
+# 示例声明文字（附录或数据节）：
+# "对于连续缺失不超过2期的变量X，采用线性插值填补（共填补XX个观测，
+# 占总样本的X.X%）。稳健性检验中使用原始非平衡面板，结果（附录表X）
+# 与主回归一致，说明插值处理不影响核心结论。"
+
+# 插值诊断：标注哪些值是插值得到的
+library(dplyr)
+df <- df %>%
+  arrange(entity_id, year) %>%
+  group_by(entity_id) %>%
+  mutate(
+    x_orig  = x,
+    x_filled = zoo::na.approx(x, maxgap = 2, na.rm = FALSE),
+    x_imputed_flag = (!is.na(x_filled)) & is.na(x_orig)  # TRUE=插值产生
+  ) %>%
+  ungroup()
+
+cat("插值比例:", mean(df$x_imputed_flag, na.rm = TRUE) * 100, "%\n")
+# 插值比例 > 10% → 极度谨慎，考虑改用Heckman纠正
+```

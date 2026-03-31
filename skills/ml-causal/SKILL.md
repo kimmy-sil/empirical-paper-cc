@@ -1047,3 +1047,726 @@ Q4: 是否关心效应异质性且共同支撑充分？
   year    = {2018}
 }
 ```
+
+---
+
+### SHAP 可解释性
+
+SHAP（SHapley Additive exPlanations）提供对 ML 模型预测的局部和全局解释，适用于 DML 的扰动参数估计和 Causal Forest 的异质性分析。
+
+**工具组合：**
+- `shap.TreeExplainer`：针对树模型（RF / XGBoost / LightGBM）的高效 SHAP 计算
+- `summary_plot`：全局特征重要性（蜂窝图）
+- PDP（Partial Dependence Plot）：特征的边际效应
+- ICE（Individual Conditional Expectation）：个体级别的效应曲线
+
+```python
+# ============================================================
+# SHAP 可解释性 — 完整可运行 Python 代码
+# pip install shap scikit-learn matplotlib pandas
+# ============================================================
+import numpy as np
+import pandas as pd
+import shap
+import matplotlib.pyplot as plt
+from sklearn.ensemble import GradientBoostingRegressor
+from sklearn.inspection import PartialDependenceDisplay
+from sklearn.model_selection import train_test_split
+
+# ---- 示例数据 ----
+np.random.seed(42)
+n = 2000
+df = pd.DataFrame({
+    'age':      np.random.normal(40, 10, n),
+    'size':     np.random.lognormal(3, 1, n),
+    'leverage': np.random.uniform(0, 1, n),
+    'region':   np.random.randint(0, 5, n).astype(float),
+    'control1': np.random.normal(0, 1, n),
+    'control2': np.random.normal(0, 1, n),
+})
+df['outcome'] = (0.3 * df['age'] + 0.5 * df['size'] -
+                 0.2 * df['leverage'] + np.random.normal(0, 1, n))
+
+feature_cols = ['age', 'size', 'leverage', 'region', 'control1', 'control2']
+X = df[feature_cols].values
+y = df['outcome'].values
+
+# ---- 训练模型（DML 中的扰动参数估计器，或独立预测模型）----
+model = GradientBoostingRegressor(n_estimators=200, max_depth=4, random_state=42)
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42)
+model.fit(X_train, y_train)
+print(f"Model R² (test): {model.score(X_test, y_test):.4f}")
+
+# ---- SHAP TreeExplainer ----
+explainer   = shap.TreeExplainer(model)
+shap_values = explainer(X_test)  # 返回 Explanation 对象（含 shap_values 和 base_values）
+
+# ---- 图1：Summary Plot（全局特征重要性，蜂窝图）----
+plt.figure(figsize=(10, 6))
+shap.summary_plot(shap_values, X_test,
+                  feature_names=feature_cols,
+                  show=False)
+plt.title("SHAP Summary Plot: Global Feature Importance")
+plt.tight_layout()
+plt.savefig("output/shap_summary_plot.png", dpi=150, bbox_inches='tight')
+plt.close()
+print("SHAP summary plot saved.")
+
+# ---- 图2：Bar Plot（平均 |SHAP| 排序）----
+plt.figure(figsize=(8, 5))
+shap.plots.bar(shap_values, max_display=10, show=False)
+plt.title("SHAP Feature Importance (Mean |SHAP value|)")
+plt.tight_layout()
+plt.savefig("output/shap_bar_plot.png", dpi=150, bbox_inches='tight')
+plt.close()
+
+# ---- 图3：Waterfall Plot（单个观测的解释）----
+plt.figure(figsize=(10, 6))
+shap.plots.waterfall(shap_values[0], show=False)  # 第一个测试样本
+plt.title("SHAP Waterfall: Single Observation Explanation")
+plt.tight_layout()
+plt.savefig("output/shap_waterfall_plot.png", dpi=150, bbox_inches='tight')
+plt.close()
+
+# ---- 图4：PDP（Partial Dependence Plot）---- 
+fig, axes = plt.subplots(1, 3, figsize=(15, 4))
+features_to_plot = [0, 1, 2]  # age, size, leverage 的列索引
+
+for ax, feat_idx in zip(axes, features_to_plot):
+    disp = PartialDependenceDisplay.from_estimator(
+        model, X_test, features=[feat_idx],
+        feature_names=feature_cols,
+        ax=ax, grid_resolution=50
+    )
+    ax.set_title(f"PDP: {feature_cols[feat_idx]}")
+    ax.set_xlabel(feature_cols[feat_idx])
+
+plt.suptitle("Partial Dependence Plots (PDP)", fontsize=14)
+plt.tight_layout()
+plt.savefig("output/shap_pdp_plots.png", dpi=150, bbox_inches='tight')
+plt.close()
+
+# ---- 图5：ICE（Individual Conditional Expectation）----
+fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+for ax, feat_idx in zip(axes, [0, 1]):  # age, size
+    disp = PartialDependenceDisplay.from_estimator(
+        model, X_test[:200], features=[feat_idx],  # 前200个样本（速度考虑）
+        feature_names=feature_cols,
+        kind='both',   # 'both' = ICE + PDP
+        ax=ax, grid_resolution=30,
+        subsample=100  # 展示100条ICE线
+    )
+    ax.set_title(f"ICE + PDP: {feature_cols[feat_idx]}")
+    ax.set_alpha(0.1)
+
+plt.suptitle("Individual Conditional Expectation (ICE) Plots", fontsize=14)
+plt.tight_layout()
+plt.savefig("output/shap_ice_plots.png", dpi=150, bbox_inches='tight')
+plt.close()
+
+# ---- SHAP Dependence Plot（特征 × 交互项）----
+plt.figure(figsize=(8, 6))
+shap.dependence_plot(
+    "age", shap_values.values, X_test,
+    feature_names=feature_cols,
+    interaction_index="size",  # 颜色表示 size 的值（交互效应）
+    show=False
+)
+plt.title("SHAP Dependence Plot: age (colored by size)")
+plt.tight_layout()
+plt.savefig("output/shap_dependence_plot.png", dpi=150, bbox_inches='tight')
+plt.close()
+
+print("所有 SHAP 图已保存至 output/ 目录")
+print(f"SHAP 值矩阵形状: {shap_values.values.shape}")
+print(f"平均 |SHAP| 排名:")
+mean_abs_shap = np.abs(shap_values.values).mean(axis=0)
+for name, val in sorted(zip(feature_cols, mean_abs_shap), key=lambda x: -x[1]):
+    print(f"  {name}: {val:.4f}")
+```
+
+---
+
+### 算法选择决策树加强
+
+在 DML 和因果森林框架内选择 ML 算法时，需综合考虑数据特点、计算资源和可解释性需求：
+
+| 数据特点 | 推荐算法 | 理由 | 典型超参数 |
+|---------|---------|------|----------|
+| 特征维度 >> 样本量（稀疏高维） | **LASSO** / Elastic Net | 稀疏性先验，收缩冗余特征，系数直接可读 | `alpha=1.0`，`cv=5` |
+| 非线性强 + 样本大（n > 2000） | **Random Forest / XGBoost** | 自动捕捉非线性和交互，无需人工构造特征 | 200-500棵树，`max_depth=5` |
+| 一般情况（不确定哪种好） | **交叉验证选超参** + 集成多算法 | 让数据说话，报告稳健性 | 见下方代码 |
+| 需要可解释性 | **LASSO > RF > NN** | LASSO系数直读；RF用SHAP解释；NN黑箱 | — |
+| 超高维 + 非线性（p > 100，大样本） | **LightGBM** | 计算效率最优，速度比XGBoost快3~5倍 | `num_leaves=31`，`min_data_in_leaf=20` |
+| 处理变量为连续型 | **RF/XGBoost**（回归器） | 连续倾向得分需要回归，非分类 | 同上 |
+| 处理变量为二元 | 倾向得分用**RF分类器** | 输出概率更稳定，trim极端值 | `n_estimators=200` |
+
+```python
+# 交叉验证自动选择最优算法（DML 稳健性检验标准流程）
+from doubleml import DoubleMLPLR, DoubleMLData
+from sklearn.linear_model import LassoCV
+from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
+import lightgbm as lgb
+import pandas as pd
+
+# 候选算法配置
+candidate_models = {
+    'LASSO': {
+        'ml_l': LassoCV(cv=5, random_state=42),
+        'ml_m': LassoCV(cv=5, random_state=42)
+    },
+    'RandomForest': {
+        'ml_l': RandomForestRegressor(n_estimators=300, max_depth=5, random_state=42),
+        'ml_m': RandomForestRegressor(n_estimators=300, max_depth=5, random_state=42)
+    },
+    'XGBoost': {
+        'ml_l': GradientBoostingRegressor(n_estimators=200, max_depth=4, random_state=42),
+        'ml_m': GradientBoostingRegressor(n_estimators=200, max_depth=4, random_state=42)
+    },
+}
+
+results_table = []
+for name, config in candidate_models.items():
+    dml = DoubleMLPLR(
+        obj_dml_data=dml_data,
+        ml_l=config['ml_l'],
+        ml_m=config['ml_m'],
+        n_folds=5, n_rep=3
+    )
+    dml.fit()
+    results_table.append({
+        'algorithm': name,
+        'coef': dml.coef[0],
+        'se':   dml.se[0],
+        'ci_lo': dml.coef[0] - 1.96 * dml.se[0],
+        'ci_hi': dml.coef[0] + 1.96 * dml.se[0]
+    })
+    print(f"{name:15s}: β={dml.coef[0]:.4f}  SE={dml.se[0]:.4f}")
+
+results_df = pd.DataFrame(results_table)
+# 若所有算法的系数差异 < 0.01，结论对 ML 选择稳健
+max_diff = results_df['coef'].max() - results_df['coef'].min()
+print(f"\n算法间最大系数差异: {max_diff:.4f}（< 0.01 表示稳健）")
+```
+
+---
+
+### GRF 异质性探索加强
+
+grf 包的 `best_linear_projection` 和 `variable_importance` 提供系统性的异质性驱动因素分析。
+
+**`best_linear_projection`（BLP）：**
+- 对 CATE 做线性投影：$\tau(x) \approx \beta_0 + \beta_1 x_1 + \beta_2 x_2 + ...$
+- $\beta_j$ 显著 → 变量 $x_j$ 驱动异质性
+- 基于半参数效率界限，提供有效推断
+
+**`variable_importance`：**
+- 基于分裂频率和深度的加权变量重要性
+- 不提供统计检验，仅用于**探索性排序**
+- 结合 BLP 进行解读
+
+```r
+# R: GRF 异质性探索加强（grf 包完整示例）
+library(grf)
+library(ggplot2)
+library(dplyr)
+
+# ---- 数据准备 ----
+df <- read.csv("data.csv")
+Y  <- as.matrix(df$outcome)
+D  <- as.matrix(df$treatment)
+
+# 异质性特征（低维，可解释）
+X_hetero <- as.matrix(df[, c("age", "size", "leverage", "region")])
+
+# 控制变量（高维）
+X_controls <- as.matrix(df[, grep("^control", names(df))])
+X_full     <- cbind(X_hetero, X_controls)
+
+# ---- 训练因果森林 ----
+cf <- causal_forest(
+  X            = X_full,
+  Y            = Y,
+  W            = D,
+  num.trees    = 4000,
+  min.node.size = 5,
+  tune.parameters = "all",  # 自动调参（min.node.size, sample.fraction 等）
+  seed         = 42
+)
+
+cat(sprintf("ATE: %.4f (SE: %.4f)\n",
+            average_treatment_effect(cf)[1],
+            average_treatment_effect(cf)[2]))
+
+# ---- best_linear_projection：检验哪些变量驱动异质性 ----
+# 对 CATE 关于异质性特征做线性投影
+blp <- best_linear_projection(
+  forest = cf,
+  A      = X_hetero,  # 只用低维解释性变量做投影
+  target.sample = "all"
+)
+cat("\n=== BLP：异质性线性投影 ===\n")
+print(blp)
+# 解读：
+#   - 截距 = ATE
+#   - A.age 显著 → 年龄驱动异质性（年龄大效应更强/弱）
+#   - 系数正负方向 = CATE 随该变量变化的方向
+
+# ---- variable_importance：变量重要性排名 ----
+vim <- variable_importance(cf)
+vim_df <- data.frame(
+  variable   = colnames(X_full),
+  importance = as.vector(vim)
+) %>% arrange(desc(importance))
+
+cat("\n=== 变量重要性（基于分裂频率）===\n")
+print(vim_df)
+
+# 可视化
+ggplot(vim_df %>% head(10), aes(x = reorder(variable, importance), y = importance)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  coord_flip() +
+  labs(title = "Causal Forest: Variable Importance (Top 10)",
+       x = "Variable", y = "Importance") +
+  theme_minimal()
+ggsave("output/grf_variable_importance.png", dpi = 150)
+
+# ---- CATE 分布与异质性检验 ----
+tau_hat <- predict(cf, estimate.variance = TRUE)
+df$cate    <- tau_hat$predictions
+df$cate_se <- sqrt(tau_hat$variance.estimates)
+
+# 异质性检验：CATE 方差是否显著大于零
+# 用 BLP 的联合 F 检验
+cat("\n=== 异质性显著性检验 ===\n")
+cat("BLP 中 A 变量的联合显著性（F 检验 p 值）:\n")
+# 提取 BLP 统计量
+blp_summary <- summary(blp)
+print(blp_summary)
+
+# ---- CATE 按关键变量分组 ----
+# 高/低分位数 CATE 对比
+tau_q75 <- quantile(df$cate, 0.75)
+tau_q25 <- quantile(df$cate, 0.25)
+
+cat(sprintf("\nCATE 分布: 均值=%.4f, 中位数=%.4f, SD=%.4f\n",
+            mean(df$cate), median(df$cate), sd(df$cate)))
+cat(sprintf("高效应组（>75%%分位）均值: %.4f\n", mean(df$cate[df$cate > tau_q75])))
+cat(sprintf("低效应组（<25%%分位）均值: %.4f\n", mean(df$cate[df$cate < tau_q25])))
+
+# ---- 高/低效应组特征比较（辅助解释）----
+df$high_cate <- df$cate > tau_q75
+cate_profile <- df %>%
+  group_by(high_cate) %>%
+  summarise(across(c("age", "size", "leverage"), mean, .names = "mean_{.col}"),
+            n = n())
+cat("\n=== 高效应组 vs 低效应组特征比较 ===\n")
+print(cate_profile)
+
+# ---- 输出 CATE 分布图 ----
+ggplot(df, aes(x = cate)) +
+  geom_histogram(bins = 50, fill = "steelblue", color = "white", alpha = 0.8) +
+  geom_vline(xintercept = mean(df$cate), color = "red",
+             linetype = "dashed", linewidth = 1) +
+  labs(title = "CATE Distribution (Causal Forest)",
+       subtitle = sprintf("Mean=%.4f, SD=%.4f", mean(df$cate), sd(df$cate)),
+       x = "Estimated CATE", y = "Count") +
+  theme_minimal()
+ggsave("output/cate_distribution.png", dpi = 150)
+```
+
+---
+
+### DynamicDML
+
+`DynamicDML`（`econml.panel.dml.DynamicDML`）用于**平衡面板 + 多期处理 + 存在状态依赖**的情形，扩展标准 DML 到动态因果框架。
+
+**马尔可夫因果图说明：**
+```
+T=0: X₀ → D₀ → Y₀
+                ↓
+T=1: X₁ → D₁ → Y₁
+         ↑
+        Y₀, D₀  ← 状态依赖
+```
+- 当期处理 $D_t$ 受历史结果 $Y_{t-1}$ 和历史处理 $D_{t-1}$ 影响（状态依赖）
+- DynamicDML 通过马尔可夫假设，在每期残差化后逐期建立正交条件
+
+**适用条件：**
+- 平衡面板（所有个体观测完整的 T 期）
+- 多期处理（非单一政策，处理状态随时间变化）
+- 存在状态依赖（当期处理/结果受历史影响）
+- CIA 假设在每期条件上成立（无未观测时变混淆）
+
+```python
+# ============================================================
+# DynamicDML — Python（econml 完整代码）
+# pip install econml scikit-learn
+# ============================================================
+import numpy as np
+import pandas as pd
+from econml.panel.dml import DynamicDML
+from sklearn.ensemble import GradientBoostingRegressor, GradientBoostingClassifier
+from sklearn.linear_model import LassoCV
+
+# ---- 数据准备（平衡面板，长格式）----
+# 必须字段：unit_id, year, outcome Y, treatment D, controls X
+np.random.seed(42)
+n_units, n_periods = 500, 4
+panel = pd.DataFrame({
+    'unit_id': np.repeat(np.arange(n_units), n_periods),
+    'year':    np.tile(np.arange(n_periods), n_units),
+})
+panel['X1'] = np.random.normal(0, 1, len(panel))
+panel['X2'] = np.random.normal(0, 1, len(panel))
+panel['D']  = (0.5 * panel['X1'] + np.random.normal(0, 1, len(panel)) > 0).astype(float)
+panel['Y']  = (0.3 * panel['D'] + 0.2 * panel['X1'] +
+               np.random.normal(0, 0.5, len(panel)))
+
+# ---- 转换为 DynamicDML 所需格式 ----
+# DynamicDML 需要：
+#   Y: (n_units, n_periods) 矩阵 或 展开后的 (n_units * n_periods,) 向量
+#   D: (n_units, n_periods) 矩阵
+#   X: (n_units, n_X_features) 时不变特征（或扩展为面板）
+#   groups: 每个观测所属的个体 ID
+
+Y_arr = panel.pivot(index='unit_id', columns='year', values='Y').values
+D_arr = panel.pivot(index='unit_id', columns='year', values='D').values
+X_arr = panel.groupby('unit_id')[['X1', 'X2']].first().values  # 时不变特征取首期
+
+# ---- 拟合 DynamicDML ----
+dynamic_dml = DynamicDML(
+    model_y   = GradientBoostingRegressor(n_estimators=100, random_state=42),
+    model_t   = GradientBoostingClassifier(n_estimators=100, random_state=42),
+    cv        = 3,
+    mc_iters  = 3,   # Monte Carlo 交叉拟合迭代次数
+    mc_agg    = 'median'
+)
+
+# fit 接口：Y(n×T), T(n×T), X(n×n_x), groups=None（单层面板）
+dynamic_dml.fit(Y_arr, D_arr, X=X_arr)
+
+# ---- 提取处理效应 ----
+# effect(X, T0, T1)：从处理水平 T0 变为 T1 时的效应
+# 对所有个体估计 D: 0→1 的效应
+effect = dynamic_dml.effect(X_arr, T0=0, T1=1)
+print(f"DynamicDML ATE (D: 0→1): {effect.mean():.4f} ± {effect.std():.4f}")
+
+# 各期效应
+for t in range(n_periods):
+    eff_t = dynamic_dml.effect(X_arr, T0=np.zeros(n_units), T1=np.ones(n_units))
+    print(f"  Period {t}: {eff_t.mean():.4f}")
+
+# 置信区间
+eff_inf = dynamic_dml.effect_inference(X_arr, T0=0, T1=1)
+print(f"\nATE 置信区间（95%）: [{eff_inf.conf_int()[0].mean():.4f}, "
+      f"{eff_inf.conf_int()[1].mean():.4f}]")
+print(eff_inf.summary_frame().describe())
+```
+
+**与静态 DML 的对比：**
+
+| 维度 | 静态 DML（PLM/IRM） | DynamicDML |
+|------|-------------------|-----------|
+| 时间维度 | 无（截面）或简单 DID 两期 | 多期面板，显式建模时间动态 |
+| 状态依赖 | 不处理 | 通过马尔可夫假设显式处理 |
+| 历史处理效应 | 不估计 | 可估计各期累积处理效应 |
+| 数据要求 | 横截面 or 面板均可 | 必须平衡面板 + 多期（T≥3） |
+| 识别假设 | CIA | CIA + 马尔可夫条件独立 |
+| 计算复杂度 | 低 | 高（逐期残差化 × MC 迭代） |
+| 适用场景 | 一次性政策冲击 | 多期干预、累积效应、政策路径 |
+
+---
+
+### Causal Forest 红线警告
+
+> ⚠️ **Causal Forest 不是因果识别方法，是异质性发现工具。**
+>
+> **核心假设：** Causal Forest 假设 CIA（Unconfoundedness / Conditional Independence Assumption）——即给定协变量 X 后，处理变量 D 与潜在结果 (Y(0), Y(1)) 相互独立：
+>
+> $$Y(1), Y(0) \perp D \mid X$$
+>
+> **这意味着：**
+> - Causal Forest **不解决内生性问题**——如果处理变量存在未被 X 控制的遗漏变量，Causal Forest 的 CATE 估计是有偏的
+> - Causal Forest **不是 IV、DID、RDD 的替代**——它依然无法识别来自内生处理变量的因果效应
+> - Causal Forest 只是在 **CIA 已经成立的前提下**，高效估计异质性处理效应
+
+**正确使用流程：**
+
+```
+Step 1: 用 DID / IV / RDD 建立因果关系
+        └→ 确认 X → Y 的因果效应存在且无偏
+           ↓
+Step 2: 在可信识别框架内，用 Causal Forest 探索异质性
+        └→ 回答"效应对哪类个体大、对哪类小"
+           ↓
+Step 3: 基于 GRF 的 BLP / variable_importance 确认异质性维度
+        └→ 结合经济理论解释异质性来源
+```
+
+**禁止的做法：**
+```
+❌ 直接在观察数据上跑 Causal Forest，宣称发现"因果"异质性效应
+❌ 用 Causal Forest 替代 IV/DID/RDD 的识别策略
+❌ 将 Causal Forest 的 CATE 作为论文主要贡献报告（应作为辅助分析）
+```
+
+---
+
+### PLM 估计 ATO 说明
+
+当样本的**共同支撑（Common Support）不充分**时，部分线性模型（PLM）的估计量不再收敛于 ATE（全样本平均处理效应），而是收敛于 **ATO（Average Treatment Effect on the Overlap，交叠加权平均处理效应）**。
+
+**ATO 定义：**
+$$\text{ATO} = \frac{E[e(X)(1-e(X))\tau(X)]}{E[e(X)(1-e(X))]}$$
+
+其中 $e(X) = P(D=1|X)$ 为倾向得分。ATO 给处于倾向得分分布中间（共同支撑充分区域）的个体赋予更高权重，而给极端倾向得分个体赋予接近零的权重。
+
+**研究者必须知晓的三点：**
+1. **ATO ≠ ATE**：若处理组和控制组的协变量分布重叠不充分，PLM 估计量收敛于 ATO，不代表总体 ATE
+2. **诊断方法**：检查倾向得分分布的重叠性（见 `dml_overlap_check.png`），若大量样本倾向得分 <0.05 或 >0.95，说明共同支撑不充分
+3. **报告方式**：若诊断显示 ATO 而非 ATE，论文中必须明确声明估计量为 ATO，并解释目标估计量的经济含义
+
+```r
+# R: PLM 估计量诊断（ATE vs ATO）
+library(DoubleML)
+library(mlr3)
+
+# 拟合 PLM
+dml_plm <- DoubleMLPLR$new(dml_data, ml_l = learner_g, ml_m = learner_m,
+                            n_folds = 5, n_rep = 3)
+dml_plm$fit()
+
+# 提取倾向得分预测（M模型对处理变量D的预测）
+ps_hat <- dml_plm$predictions$ml_m[, 1, 1]  # 第一折第一重复
+
+# 诊断重叠性
+cat(sprintf("倾向得分分布:\n"))
+cat(sprintf("  均值: %.4f, 中位数: %.4f\n", mean(ps_hat), median(ps_hat)))
+cat(sprintf("  < 0.05: %d 个 (%.1f%%)\n",
+            sum(ps_hat < 0.05), mean(ps_hat < 0.05) * 100))
+cat(sprintf("  > 0.95: %d 个 (%.1f%%)\n",
+            sum(ps_hat > 0.95), mean(ps_hat > 0.95) * 100))
+
+# 判断 ATE vs ATO
+extreme_ratio <- mean(ps_hat < 0.05 | ps_hat > 0.95)
+if (extreme_ratio > 0.05) {
+  warning(sprintf("%.1f%% 样本倾向得分极端（<0.05 或 >0.95），PLM 估计量趋向 ATO 而非 ATE。\n",
+                  extreme_ratio * 100))
+  cat("建议：(1) 在论文中明确声明估计量为 ATO；\n")
+  cat("       (2) 考虑限制样本到共同支撑充分的子集；\n")
+  cat("       (3) 或切换至 IRM 使用 trimming。\n")
+} else {
+  cat("✓ 重叠性良好，PLM 估计量近似 ATE\n")
+}
+```
+
+---
+
+### DML+DID 红线警告
+
+> ⚠️ **严重方法论错误：不能将时间/个体固定效应作为高维协变量放入 PLM，再将系数解读为 DID 估计量。**
+>
+> **错误做法（常见于错误论文）：**
+> ```python
+> # 错误示例：将年份哑变量和个体哑变量全部作为 X 列加入 DML
+> X_wrong = [year_dummy_2019, year_dummy_2020, ...,
+>             firm_id_dummy_1, firm_id_dummy_2, ...]  # 高维固定效应哑变量
+> dml_plm = DoubleMLPLR(data, ml_l=RF, ml_m=RF, ...)
+> # 然后宣称估计了 DID 效应 → 这是错误的
+> ```
+>
+> **为什么是错的：**
+> 1. PLM 的设计假设是 $Y = D\theta + g_0(X) + \varepsilon$，其中 $g_0(X)$ 由 ML 非参数估计
+> 2. 将固定效应哑变量放入 ML 模型中，ML 会用高维哑变量 "记住" 每个个体，导致 $m_0(X)$ 估计过拟合、残差化失效
+> 3. 系数 $\theta$ 不再有 DID 的因果解释
+>
+> **正确做法（DML + DID）：**
+> 1. 先用 `feols` 或 `lm` 对 Y 和 D 分别进行双向固定效应 demean（去除个体和时间固定效应）
+> 2. 用 demean 后的残差 $\tilde{Y}, \tilde{D}$ 构造 DML 问题，控制变量 X 为**时变协变量**（不含固定效应）
+> 3. 在 DML 的残差化步骤中进一步控制 X 的非线性效应
+
+```r
+# R: 正确的 DML + DID 实现方式
+library(fixest)
+library(DoubleML)
+library(mlr3)
+library(data.table)
+
+# ---- Step 1：双向 FE demean（先去除固定效应）----
+# 使用 fixest 的 demean 函数（或 feols 残差）
+res_y_fe <- feols(outcome   ~ 1 | unit_fe + year_fe, data = df)
+res_d_fe <- feols(treatment ~ 1 | unit_fe + year_fe, data = df)
+
+df$Y_demeaned <- residuals(res_y_fe)  # 去除个体+时间FE后的残差
+df$D_demeaned <- residuals(res_d_fe)
+
+# ---- Step 2：DML 使用 demean 后残差 + 时变协变量 ----
+# X 只包含时变协变量（不含固定效应哑变量！）
+X_vars_timevarying <- c("time_vary_control1", "time_vary_control2")
+
+dml_data_did <- DoubleMLData$new(
+  data   = df,
+  y_col  = "Y_demeaned",        # demean 后的 Y
+  d_cols = "D_demeaned",        # demean 后的 D
+  x_cols = X_vars_timevarying   # 仅时变协变量
+)
+
+learner_g <- lrn("regr.ranger", num.trees = 200)
+learner_m <- lrn("regr.ranger", num.trees = 200)
+
+dml_did <- DoubleMLPLR$new(dml_data_did, ml_l = learner_g, ml_m = learner_m,
+                            n_folds = 5, n_rep = 3)
+dml_did$fit()
+cat("DML + DID 估计（正确方式）:\n")
+print(dml_did$summary())
+```
+
+---
+
+### DML+RDD 操作区分
+
+在 RDD 框架内使用 DML 时，**操作规则与标准 DML + DID/IV 不同**：
+
+**核心原则：只对 Y 做残差化，不对 D 做残差化。**
+
+**原因：**
+- RDD 中，处理变量 $D$ 由断点规则决定（$D = \mathbf{1}[R \geq c]$），没有内生性问题
+- 对 $D$ 做残差化会破坏断点的识别结构，改变估计量的解释
+- 只需对 $Y$ 去除协变量 $X$ 的非线性影响（降低残差方差，提高精度）
+
+```r
+# R: DML + RDD 正确操作
+library(rdrobust)
+library(ranger)
+library(dplyr)
+
+# ---- Step 1：仅对 Y 做 ML 残差化（控制协变量）----
+# 在带宽内样本上训练
+h_opt <- rdrobust(df$outcome, df$r_centered, c=0, p=1)$bws["h",1]
+df_bw <- df %>% filter(abs(r_centered) <= h_opt)
+
+# 用随机森林对 Y ~ X（协变量，不含评分变量R或处理D）做预测
+rf_y <- ranger(
+  outcome ~ control1 + control2 + control3,  # 不含 r_centered 和 above_cutoff！
+  data        = df_bw,
+  num.trees   = 500,
+  sample.fraction = 0.7  # 非训练集预测（避免过拟合）
+)
+# 交叉拟合残差
+df_bw$Y_residual <- df_bw$outcome - predict(rf_y, data = df_bw)$predictions
+
+# ---- Step 2：用 Y 残差对原始 RDD 评分变量做 rdrobust ----
+# D（above_cutoff）保持原样，不做残差化
+rdd_dml <- rdrobust(
+  y    = df_bw$Y_residual,  # 残差化后的 Y
+  x    = df_bw$r_centered,  # 原始评分变量（不变）
+  c    = 0, p = 1,
+  h    = h_opt              # 固定带宽（已用原始 Y 确定）
+)
+summary(rdd_dml)
+
+# ---- 对比：原始 RDD vs DML + RDD ----
+rdd_original <- rdrobust(y = df_bw$outcome, x = df_bw$r_centered,
+                          c = 0, p = 1, h = h_opt)
+cat(sprintf("原始 RDD:     %.4f (SE: %.4f)\n",
+            rdd_original$coef["Bias-Corrected",1], rdd_original$se["Robust",1]))
+cat(sprintf("DML + RDD:    %.4f (SE: %.4f)\n",
+            rdd_dml$coef["Bias-Corrected",1], rdd_dml$se["Robust",1]))
+cat("注：点估计应相近（协变量外生），SE 应降低（ML 吸收了协变量噪音）\n")
+```
+
+---
+
+### 阿森费尔特沉降警告
+
+**阿森费尔特沉降（Ashenfelter's Dip）：** 处理组个体在接受处理之前，由于自我选择，往往在政策前期存在**系统性趋势偏离**（通常是结果变量下滑后参与培训/政策）。
+
+**在 DML+DID 结合中的表现：**
+- DML 拟合的 $E[Y|X]$ 如果未能控制处理前的临时冲击，会导致残差系统性非零
+- 若处理组在政策前存在 Ashenfelter Dip（结果暂时下降），DML 残差化后 DID 估计量会高估政策效果
+
+**检验方法：**
+
+```r
+# R: Ashenfelter Dip 检验（DML+DID 必做）
+library(fixest)
+library(dplyr)
+library(ggplot2)
+
+# 方法1：处理组 vs 控制组的政策前趋势图（Event Study）
+# 在未加入 DML 的简单规格下检查
+res_event <- feols(
+  outcome ~ i(year, treated, ref = base_year) | unit_fe + year_fe,
+  data    = df,
+  cluster = ~unit_id
+)
+iplot(res_event,
+      main = "Event Study: Ashenfelter Dip Check",
+      xlab = "Year relative to policy",
+      ref.line = 1)  # 政策前各年系数应在0附近
+
+# 方法2：处理组政策前2~3期的 outcome 趋势
+pre_periods <- df %>%
+  filter(year < policy_year, treated == 1) %>%
+  group_by(year) %>%
+  summarise(mean_outcome = mean(outcome), .groups = "drop")
+
+ggplot(pre_periods, aes(x = year, y = mean_outcome)) +
+  geom_line(linewidth = 1, color = "steelblue") +
+  geom_point(size = 3, color = "steelblue") +
+  geom_vline(xintercept = policy_year - 0.5, linetype = "dashed", color = "red") +
+  labs(title = "处理组政策前均值趋势（检验 Ashenfelter Dip）",
+       subtitle = "若政策前 1~2 期明显下降，存在 Ashenfelter Dip",
+       x = "年份", y = "结果变量均值") +
+  theme_minimal()
+ggsave("output/ashenfelter_dip_check.png", dpi = 150)
+
+# 方法3：DML 残差的政策前分组检验
+# 若 DML+DID 的 Y 残差在政策前仍存在趋势，说明控制不充分
+df_pre <- df %>% filter(year < policy_year)
+res_dml_pretrend <- feols(
+  Y_demeaned ~ i(year, treated, ref = policy_year - 1) | unit_fe + year_fe,
+  data    = df_pre,
+  cluster = ~unit_id
+)
+iplot(res_dml_pretrend, main = "DML 残差政策前趋势（应均不显著）")
+# 若仍有显著的政策前趋势，说明存在 Ashenfelter Dip 且 DML 未充分控制
+```
+
+**处理建议：**
+- 若发现 Ashenfelter Dip：加入处理前 1~2 期的结果变量作为控制变量（lagged outcome）
+- 或在 DML 的 X 中加入政策前期的结果变量，让 ML 吸收这一预处理趋势
+- 或使用 Callaway-Sant'Anna 的 "not-yet-treated" 对照组（避免选用已知有类似 dip 的对照组）
+
+---
+
+### Estimand 声明
+
+**DML 框架下各模型的估计量（Estimand）明确声明：**
+
+| 模型 | 默认估计量 | 条件 | 必须声明 |
+|------|---------|------|---------|
+| **PLM（部分线性模型）** | **ATO**（共同支撑不足时） | CIA + 重叠性充分时近似 ATE | 明确声明不是 ATE，报告倾向得分重叠性诊断 |
+| **IRM（交互回归模型）** | **ATE / ATT / CATE** | 由 `score` 参数控制 | 指定估计的是哪一个，说明目标人群 |
+| **DML-IV（IIVM）** | **LATE** | 工具变量下的 Complier 效应 | 同 IV/2SLS 的 Complier 声明要求 |
+| **因果森林（CausalForest）** | **CATE（条件 ATE）** | CIA，异质性 ATE | 声明是 CIA 下的 CATE，依赖于 X 的充分性 |
+| **DynamicDML** | **累积 ATE（各期）** | 马尔可夫 CIA | 说明是哪些期的累积效应 |
+
+**PLM → ATO 标准声明模板：**
+```
+本文 DML 部分线性模型（PLM）的估计量，在样本共同支撑充分（倾向得分均在 [0.05, 0.95] 范围内）
+时近似总体平均处理效应（ATE）。倾向得分重叠性诊断显示 [X%] 的样本倾向得分极端，
+因此估计量更接近交叠加权平均处理效应（ATO），其政策含义适用于处理状态有实质不确定性的个体子群。
+```
+
+**IRM → ATE/ATT/CATE 标准声明模板：**
+```
+本文 DML 交互回归模型（IRM）以 [ATE/ATT/CATE] 为目标估计量。
+[若 ATE：]估计结果代表从控制组转换为处理组的总体平均效应，
+假设共同支撑充分且无溢出效应。
+[若 ATT：]估计结果代表处理组个体的平均处理效应，
+倾向得分加权剔除了处理组和控制组的可比性缺口。
+[若 CATE：]通过 CausalForest / DR-Learner 估计，
+报告各协变量取值下的条件处理效应，并用 BLP 检验其显著性。
+```

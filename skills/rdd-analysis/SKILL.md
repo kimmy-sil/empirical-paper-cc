@@ -841,3 +841,455 @@ foreach c of numlist 60 70 80 90 {
 | 断点特征不同（如不同地区） | 分断点报告 + 差异性横截面回归 |
 | 担心分断点检验样本量不足 | 每个断点至少需要 200+ 个样本 | 
 | 各断点和并后报告哪个 | 主估计用 pooled，武为稳健性单独一一列出 |
+
+---
+
+### RD-DD 方法（断点 + 双重差分结合）
+
+**适用场景：** 断点附近存在**随时间变化的混杂因素**（time-varying confounders），仅靠截面 RDD 无法控制，需要结合 DID 吸收时间趋势。
+
+**典型情况：**
+- 政策同时在时间上发生（某年某月），且在阈值两侧分配（评分 ≥ 阈值才受到政策）
+- 经济冲击与断点在时间上相关，可能影响阈值两侧（pure RDD 无法控制）
+- 需要控制个体/单元固定效应（消除时不变混淆）
+
+**与标准 RDD 和 DID 的对比：**
+
+| 方法 | 识别变异 | 控制 | 限制 |
+|------|---------|------|------|
+| 标准 RDD | 截面：阈值两侧横向比较 | 无时间趋势控制 | 无法控制时变混淆 |
+| 标准 DID | 时间：处理前后纵向比较 | 无空间/分数控制 | 需要平行趋势 |
+| RD-DD | 阈值 × 时间双重变异 | 同时控制 FE + 评分多项式 | 需要面板数据 + 双重假设 |
+
+**识别假设：**
+1. **RDD 假设：** 阈值附近连续性（无精确操控评分变量）
+2. **DID 假设：** 阈值两侧的时间趋势在政策前平行（条件平行趋势）
+
+```r
+# R: RD-DD 代码模板（rdrobust + fixest 结合）
+library(rdrobust)
+library(fixest)
+library(dplyr)
+
+# ---- 数据结构要求 ----
+# 面板数据：单元 × 时间
+# 必须包含：评分变量 r_centered、时间虚拟 post、处理虚拟 above_cutoff
+
+df <- df %>%
+  mutate(
+    r_centered   = running_var - cutoff,
+    above_cutoff = as.integer(r_centered >= 0),
+    # 交互项：处理指示 × 政策后哑变量（RD-DD 识别变量）
+    rddd_treat   = above_cutoff * post
+  )
+
+# ---- Step 1：确定最优带宽（仅用截面 RDD，基于政策前数据）----
+bw_ref <- rdrobust(
+  y = df$outcome[df$post == 0],
+  x = df$r_centered[df$post == 0],
+  c = 0, p = 1, bwselect = "mserd"
+)
+h_opt <- bw_ref$bws["h", 1]
+cat(sprintf("RDD 最优带宽: %.4f\n", h_opt))
+
+# ---- Step 2：限制带宽内样本 ----
+df_bw <- df %>% filter(abs(r_centered) <= h_opt)
+
+# ---- Step 3：RD-DD 主估计 ----
+# 模型：Y_it = α + β·(above × post) + f(r)·post + f(r) + FE + ε
+# 其中 f(r) 为评分变量的局部多项式
+res_rddd <- feols(
+  outcome ~ rddd_treat +
+    r_centered + above_cutoff + post +           # 主效应
+    r_centered:post + r_centered:above_cutoff +  # 评分多项式 × 时间/处理交互
+    control1 + control2 |
+    unit_fe + year_fe,                           # 单元 + 时间 FE
+  data    = df_bw,
+  cluster = ~unit_id
+)
+summary(res_rddd)
+# 关注：rddd_treat 的系数 = RD-DD 估计量
+
+# ---- Step 4：预趋势检验（条件平行趋势）----
+# 在政策前期，阈值两侧的趋势应平行
+df_pre <- df_bw %>% filter(post == 0)
+# 用年份 × above_cutoff 交互检验政策前趋势差异
+res_pretrend <- feols(
+  outcome ~ i(year, above_cutoff, ref = base_year) + r_centered | unit_fe,
+  data    = df_pre,
+  cluster = ~unit_id
+)
+iplot(res_pretrend, main = "Pre-trend Check: Threshold × Year")
+# 期望：政策前所有年份的 above_cutoff × year 系数在0附近
+
+# ---- Step 5：带宽敏感性 ----
+bw_sensitivity_rddd <- lapply(c(0.5, 0.75, 1.0, 1.25, 1.5) * h_opt, function(h) {
+  df_h <- df %>% filter(abs(r_centered) <= h)
+  res  <- feols(
+    outcome ~ rddd_treat + r_centered + above_cutoff + post +
+      r_centered:post + r_centered:above_cutoff | unit_fe + year_fe,
+    data = df_h, cluster = ~unit_id
+  )
+  data.frame(bw = h, coef = coef(res)["rddd_treat"],
+             se  = se(res)["rddd_treat"],
+             n   = nrow(df_h))
+}) |> bind_rows()
+print(bw_sensitivity_rddd)
+```
+
+---
+
+### Bleemer-Mehta (2022) RDD 机制分析
+
+**方法来源：** Bleemer & Mehta (2022) *"Income-Based Affirmative Action in Undergraduate Admissions"*，使用 RDD 框架定量分解机制路径的贡献度。
+
+**核心逻辑：**
+1. 主 RDD：$\hat{\tau}_{total}$（处理变量 D 对结果 Y 的总效应）
+2. 机制 RDD：用机制变量 M（如"是否进入名校"）预测结果变量 → 得到 $\hat{Y}_M = f(\hat{M})$
+3. 将预测值 $\hat{Y}_M$ 作为因变量对 RDD 重跑 → 得到 $\hat{\tau}_{M \to Y}$
+4. 机制解释力度 = $\hat{\tau}_{M \to Y} / \hat{\tau}_{total}$
+
+**适用条件：**
+- 机制变量 M 本身在断点处也有跳跃（或与 M 的变化相关）
+- 机制变量 M 不存在逆因果（M 必须先于 Y）
+- 多个机制时，各机制解释力度之和应约等于总效应
+
+```r
+# R: Bleemer-Mehta RDD 机制分析代码模板
+library(rdrobust)
+library(fixest)
+library(dplyr)
+
+# ---- 假设：主 RDD 已完成 ----
+# rdd_main: rdrobust 对 outcome ~ r_centered 的主估计
+# tau_total: 主 RDD 估计量（总效应）
+tau_total <- rdd_main$coef["Bias-Corrected", 1]
+h_main    <- rdd_main$bws["h", 1]
+
+# ---- 机制分析：以机制变量 M 为中介 ----
+# 步骤1：用控制变量和机制变量预测结果（样本内拟合）
+# 使用带宽外样本拟合，带宽内预测（避免循环内生）
+df_outside_bw <- df %>% filter(abs(r_centered) > h_main)
+df_inside_bw  <- df %>% filter(abs(r_centered) <= h_main)
+
+# 用带宽外数据训练 Y ~ M 的关系
+fit_mechanism <- lm(outcome ~ mechanism_var + control1 + control2,
+                    data = df_outside_bw)
+
+# 步骤2：预测带宽内个体的结果（基于机制变量）
+df_inside_bw$y_pred_via_M <- predict(fit_mechanism, newdata = df_inside_bw)
+
+# 步骤3：用预测值作为因变量跑 RDD → 得到机制贡献的效应
+rdd_mechanism <- rdrobust(
+  y = df_inside_bw$y_pred_via_M,
+  x = df_inside_bw$r_centered,
+  c = 0, p = 1,
+  h = h_main  # 固定与主 RDD 相同的带宽，便于比较
+)
+tau_mechanism <- rdd_mechanism$coef["Bias-Corrected", 1]
+
+# 步骤4：计算机制解释力度
+mechanism_share <- tau_mechanism / tau_total
+cat(sprintf("总效应 τ_total       = %.4f\n", tau_total))
+cat(sprintf("机制效应 τ_mechanism = %.4f\n", tau_mechanism))
+cat(sprintf("机制解释力度         = %.1f%%\n", mechanism_share * 100))
+
+# ---- 多机制分解 ----
+mechanisms <- c("mechanism1", "mechanism2", "mechanism3")
+mech_results <- lapply(mechanisms, function(m) {
+  fit_m <- lm(as.formula(paste("outcome ~", m, "+ control1 + control2")),
+              data = df_outside_bw)
+  df_inside_bw$y_pred <- predict(fit_m, newdata = df_inside_bw)
+
+  rdd_m <- rdrobust(y = df_inside_bw$y_pred, x = df_inside_bw$r_centered,
+                    c = 0, p = 1, h = h_main)
+  tau_m <- rdd_m$coef["Bias-Corrected", 1]
+  data.frame(mechanism = m, tau_m = tau_m, share = tau_m / tau_total * 100)
+}) |> bind_rows()
+
+cat("\n=== 机制分解结果 ===\n")
+print(mech_results)
+cat(sprintf("各机制之和: %.1f%%（应约等于100%%，否则机制不完整）\n",
+            sum(mech_results$share)))
+```
+
+---
+
+### CER 最优带宽
+
+`rdrobust` 提供两类带宽：
+
+| 带宽类型 | 英文全称 | 用途 | `bwselect` 参数 |
+|---------|---------|------|----------------|
+| **MSE 带宽** | Mean Squared Error optimal | 点估计最优（偏误-方差权衡） | `"mserd"` |
+| **CER 带宽** | Coverage Error Rate optimal | 置信区间覆盖率最优 | `"cerrd"` |
+
+**关键区别：**
+- MSE 带宽最小化 $E[(\hat{\tau} - \tau)^2]$，适合**点估计报告**
+- CER 带宽最小化置信区间的覆盖误差，适合**统计推断和置信区间报告**
+- Calonico et al. (2020) 建议：**点估计用 MSE 带宽，置信区间用 Robust CI（基于 CER 带宽计算偏误修正）**
+
+```r
+# R: CER 带宽 vs MSE 带宽比较
+library(rdrobust)
+
+# MSE 最优带宽（点估计）
+rdd_mse <- rdrobust(
+  y = df$outcome, x = df$r_centered, c = 0,
+  p = 1, bwselect = "mserd"
+)
+
+# CER 最优带宽（置信区间）
+rdd_cer <- rdrobust(
+  y = df$outcome, x = df$r_centered, c = 0,
+  p = 1, bwselect = "cerrd"
+)
+
+cat(sprintf("MSE 带宽: h = %.4f, b = %.4f\n",
+            rdd_mse$bws["h", 1], rdd_mse$bws["b", 1]))
+cat(sprintf("CER 带宽: h = %.4f, b = %.4f\n",
+            rdd_cer$bws["h", 1], rdd_cer$bws["b", 1]))
+
+# CER 带宽通常比 MSE 带宽更窄（牺牲点估计精度，换取更准确的推断）
+cat(sprintf("CER/MSE 比值: %.2f（通常 <1，CER更保守）\n",
+            rdd_cer$bws["h", 1] / rdd_mse$bws["h", 1]))
+
+# ---- 推荐报告方式 ----
+# 点估计：用 MSE 带宽的 Bias-Corrected 列
+# 置信区间：用 MSE 或 CER 带宽的 Robust 列（两者均可，CER 更严谨）
+cat("\n=== 主估计（MSE 带宽，Bias-Corrected 点估计 + Robust CI）===\n")
+summary(rdd_mse)
+
+cat("\n=== 稳健性（CER 带宽）===\n")
+summary(rdd_cer)
+
+# ---- 输出对比表 ----
+results_bw <- data.frame(
+  spec         = c("MSE 带宽", "CER 带宽"),
+  bandwidth    = c(rdd_mse$bws["h",1], rdd_cer$bws["h",1]),
+  coef_bc      = c(rdd_mse$coef["Bias-Corrected",1], rdd_cer$coef["Bias-Corrected",1]),
+  ci_lo_robust = c(rdd_mse$ci["Robust",1], rdd_cer$ci["Robust",1]),
+  ci_hi_robust = c(rdd_mse$ci["Robust",2], rdd_cer$ci["Robust",2])
+)
+print(round(results_bw, 4))
+```
+
+---
+
+### ITT vs TOT 区分
+
+| 类型 | 全称 | 等价关系 | rdrobust 实现 |
+|------|------|---------|--------------|
+| **ITT** | Intent-to-Treat | Sharp RDD = ITT = TOT | 标准 `rdrobust(y, x)` |
+| **TOT** | Treatment-on-the-Treated | Fuzzy RDD: TOT = IV/RDD 估计量 | `rdrobust(y, x, fuzzy = actual_treatment)` |
+
+**Sharp RDD：**
+- 阈值严格决定处理（$D = \mathbf{1}[R \geq c]$，100% 服从）
+- 此时 ITT = TOT，因为每个达到阈值的人都被处理了
+- 不需要区分 ITT 和 TOT
+
+**Fuzzy RDD：**
+- 阈值仅提高处理概率（不完全服从），存在 Always-taker 和 Never-taker
+- $\text{ITT} = E[Y | R \geq c] - E[Y | R < c]$（常规 rdrobust 估计）
+- $\text{TOT} = \text{LATE at cutoff} = \text{ITT} / \text{First Stage}$（Fuzzy rdrobust 估计）
+
+```r
+# R: Sharp RDD — ITT = TOT
+rdd_sharp <- rdrobust(
+  y = df$outcome,
+  x = df$r_centered,
+  c = 0, p = 1, bwselect = "mserd"
+  # 不需要 fuzzy 参数
+)
+summary(rdd_sharp)
+# 此时估计量既是 ITT 也是 TOT（因为 D = 1(R ≥ 0)）
+
+# ---- Fuzzy RDD：明确区分 ITT 和 TOT ----
+
+# ITT（常规 rdrobust，以 above_cutoff 为"处理"）
+rdd_itt <- rdrobust(
+  y = df$outcome,
+  x = df$r_centered,
+  c = 0, p = 1, bwselect = "mserd"
+  # 不传 fuzzy → 估计量是 ITT
+)
+tau_itt <- rdd_itt$coef["Bias-Corrected", 1]
+cat(sprintf("ITT（意向处理效应）= %.4f\n", tau_itt))
+
+# 第一阶段：处理概率在阈值处的跳跃
+rdd_first_stage <- rdrobust(
+  y = df$actual_treatment,  # 实际处理变量（非 above_cutoff）
+  x = df$r_centered,
+  c = 0, p = 1, bwselect = "mserd"
+)
+first_stage_jump <- rdd_first_stage$coef["Bias-Corrected", 1]
+cat(sprintf("第一阶段（处理概率跳跃）= %.4f\n", first_stage_jump))
+
+# TOT（Fuzzy RDD，本质是 IV：IV = above_cutoff，内生变量 = actual_treatment）
+rdd_tot <- rdrobust(
+  y     = df$outcome,
+  x     = df$r_centered,
+  c     = 0,
+  fuzzy = df$actual_treatment,  # 实际处理变量
+  p     = 1, bwselect = "mserd"
+)
+tau_tot <- rdd_tot$coef["Bias-Corrected", 1]
+cat(sprintf("TOT（处理效应，LATE at cutoff）= %.4f\n", tau_tot))
+
+# 验证：TOT ≈ ITT / 第一阶段
+cat(sprintf("验证: ITT / First Stage = %.4f ≈ TOT = %.4f\n",
+            tau_itt / first_stage_jump, tau_tot))
+
+# ---- 输出对比表 ----
+cat("\n=== ITT vs TOT 对比 ===\n")
+results_fuzzy <- data.frame(
+  estimand    = c("ITT（意向处理）", "First Stage（处理跳跃）", "TOT（LATE at cutoff）"),
+  estimate    = c(tau_itt, first_stage_jump, tau_tot),
+  ci_lo       = c(rdd_itt$ci["Robust",1], rdd_first_stage$ci["Robust",1], rdd_tot$ci["Robust",1]),
+  ci_hi       = c(rdd_itt$ci["Robust",2], rdd_first_stage$ci["Robust",2], rdd_tot$ci["Robust",2])
+)
+print(round(results_fuzzy, 4))
+```
+
+---
+
+### 控制变量加入方式
+
+在 RDD 中加入控制变量的**正确方法**：控制变量以**线性可分**的形式加入，**不与处理变量（或断点指示变量）交互**。
+
+**正确做法（线性可分）：**
+$$Y = \tau D + f(R) + \mathbf{X}'\gamma + \varepsilon$$
+
+**错误做法（控制变量 × 处理交互）：**
+$$Y = \tau D + f(R) + \mathbf{X}'\gamma + D \cdot \mathbf{X}'\delta + \varepsilon$$
+（后者会改变识别对象，混淆 LATE 的解释）
+
+**控制变量的作用：** 降低残差方差，提高估计精度，但不改变点估计（在正确规格下）
+
+```r
+# R: RDD 控制变量加入示例
+
+# ---- 无控制变量（基准）----
+rdd_no_ctrl <- rdrobust(
+  y = df$outcome, x = df$r_centered, c = 0,
+  p = 1, bwselect = "mserd"
+)
+
+# ---- 加入控制变量（covs 参数，线性可分）----
+# rdrobust 通过 covs 参数加入控制变量（内部线性部分化）
+rdd_with_ctrl <- rdrobust(
+  y    = df$outcome,
+  x    = df$r_centered,
+  c    = 0,
+  p    = 1,
+  bwselect = "mserd",
+  covs = df[, c("control1", "control2", "control3")]  # 控制变量矩阵
+)
+
+cat("=== 无控制变量 ===\n"); summary(rdd_no_ctrl)
+cat("\n=== 加入控制变量 ===\n"); summary(rdd_with_ctrl)
+
+# 注意：点估计应基本不变，但标准误会降低（精度提升）
+cat(sprintf("\n点估计变化: %.4f → %.4f（差异应 <5%%）\n",
+            rdd_no_ctrl$coef["Bias-Corrected",1],
+            rdd_with_ctrl$coef["Bias-Corrected",1]))
+cat(sprintf("SE 变化: %.4f → %.4f（应降低）\n",
+            rdd_no_ctrl$se["Robust",1],
+            rdd_with_ctrl$se["Robust",1]))
+
+# ---- 用 feols 手动实现（带宽内线性控制变量）----
+# 限制在最优带宽内
+h_opt <- rdd_with_ctrl$bws["h", 1]
+df_bw <- df %>% filter(abs(r_centered) <= h_opt)
+
+# 线性可分控制变量（不交互）
+res_rdd_ols <- feols(
+  outcome ~ above_cutoff + r_centered + above_cutoff:r_centered +
+    control1 + control2 + control3,  # 控制变量独立加入，不交互
+  data    = df_bw,
+  weights = ~ triangular_weight,    # 三角核权重
+  cluster = ~unit_id
+)
+summary(res_rdd_ols)
+```
+
+---
+
+### Donut Hole 检验定位调整
+
+**原有内容（Step 7c）补充警告：**
+
+> ⚠️ **Donut RD 精度警告（Cattaneo et al. 2023）：**
+>
+> Donut RD 通过排除最接近断点的观测（$|R| < d$）来处理潜在操控。但 Cattaneo, Titiunik & Vazquez-Bare (2023) 指出：
+>
+> 1. **估计精度下降**：Donut 排除了信息最密集的断点区域，导致方差显著增大、置信区间变宽。
+> 2. **改变估计对象**：Donut RD 估计的不再是断点处（$R = 0$）的 LATE，而是 $|R| \geq d$ 处的效应，存在外推问题。
+> 3. **建议仅在以下条件下使用 Donut RD：**
+>    - 密度检验（rddensity）显示有操控迹象（$p < 0.10$）
+>    - 必须同时报告标准 RD 结果作为对比
+>    - 说明 Donut 宽度 $d$ 的选择依据（如操控嫌疑区域的范围）
+>
+> **替代建议：** 若密度检验未发现操控迹象，不需要做 Donut RD。若担心离散评分变量的测量误差，考虑使用连续化方法（如 rdrobust 的 `mass_points` 参数）。
+
+```r
+# R: 正确的 Donut Hole 检验——配合密度检验结果决定是否做
+library(rddensity)
+library(rdrobust)
+
+# 先做密度检验
+density_res <- rddensity(X = df$r_centered, c = 0)
+density_pval <- density_res$test$p_jk  # Jackknife p-value
+cat(sprintf("密度检验 p 值: %.4f\n", density_pval))
+
+if (density_pval < 0.10) {
+  cat("⚠️ 检测到潜在操控迹象，进行 Donut RD\n")
+
+  # 标准 RD（对比基准）
+  rdd_standard <- rdrobust(y = df$outcome, x = df$r_centered, c = 0, p = 1)
+  tau_standard  <- rdd_standard$coef["Bias-Corrected", 1]
+
+  # Donut RD（排除 |r| < d 的观测）
+  donut_widths <- c(0.1, 0.2, 0.5) * rdd_standard$bws["h", 1]  # 相对于带宽的比例
+  donut_results <- lapply(donut_widths, function(d) {
+    df_d <- df %>% filter(abs(r_centered) >= d)
+    res  <- rdrobust(y = df_d$outcome, x = df_d$r_centered, c = 0, p = 1)
+    data.frame(donut = d, coef_bc = res$coef["Bias-Corrected",1],
+               ci_lo = res$ci["Robust",1], ci_hi = res$ci["Robust",2],
+               se    = res$se["Robust",1])
+  }) |> bind_rows()
+
+  cat("\n=== Donut RD 对比（密度检验显示操控嫌疑时才使用）===\n")
+  cat(sprintf("标准 RD: %.4f\n", tau_standard))
+  print(donut_results)
+
+} else {
+  cat("✓ 密度检验未发现操控证据（p > 0.10），不需要 Donut RD\n")
+  cat("  直接报告标准 rdrobust 结果即可\n")
+}
+```
+
+---
+
+### Estimand 声明
+
+**RDD → LATE（断点处局部效应）**
+
+在论文中，每次报告 RDD 结果时，**必须**包含以下声明：
+
+| 声明项目 | 内容要求 |
+|----------|---------|
+| 估计量定义 | 明确标注"本文 RDD 估计量为 LATE（断点处局部平均处理效应）" |
+| 局部性限制 | 声明结论仅对评分变量接近阈值（$R \approx c$）的个体成立 |
+| 外推限制 | 明确声明不能外推到远离断点的个体（远离阈值者可能有完全不同的效应） |
+| Fuzzy vs Sharp | Fuzzy RDD 报告 TOT（LATE at cutoff）而非 ITT，需明确区分 |
+| 带宽说明 | 说明估计所用带宽及其选择方法（MSE/CER），有效样本量 |
+
+**标准声明模板（论文正文或脚注）：**
+```
+本文 RDD 估计量识别的是断点 [阈值描述] 附近的局部平均处理效应（LATE at the cutoff）。
+该估计量仅对评分变量 [评分变量名] 接近阈值 [c 值] 的个体具有直接因果解释，
+不能外推到评分远低于或远高于阈值的群体，
+这些群体在可观测和不可观测特征上可能与断点附近个体存在系统性差异。
+估计采用局部线性回归，MSE 最优带宽 h = [h 值]，有效样本量为 [N_left]/[N_right]（阈值左/右侧）。
+```

@@ -916,3 +916,608 @@ foreach k of local industries {
 | 预期效应方向 | 检验 shifts 与 shares 的独立性 | shares 与 shifts 在基期无相关 |
 | AKM 标准误 | industry-level 聚类 | 报告并与 region 聚类比较 |
 | BHJ 冲击随机性 | shifts 与行业前定特征回归 | 无显著预测关系 |
+
+---
+
+### 倍增比自动计算
+
+跑完 2SLS 后，自动计算 |β_2SLS / β_OLS|。若比值 > 5，说明 IV 估计量放大远超 OLS，通常意味着弱工具、LATE 群体特殊、或存在测量误差被放大，需要额外审慎解释。
+
+**经验判断规则：**
+- |β_2SLS / β_OLS| ≈ 1~2：正常，IV 修正了适度的衰减偏误
+- |β_2SLS / β_OLS| ∈ (2, 5]：需论证 Complier 群体的特殊性
+- |β_2SLS / β_OLS| > 5：⚠️ 警告——极可能存在弱工具问题或估计不稳定
+
+```python
+# Python: 自动计算倍增比（linearmodels + statsmodels）
+import numpy as np
+import pandas as pd
+import statsmodels.formula.api as smf
+from linearmodels.iv import IV2SLS
+
+# ---- OLS 估计 ----
+ols_formula = f"{outcome} ~ 1 + {endogenous} + {' + '.join(controls)}"
+res_ols = smf.ols(ols_formula, data=df).fit(cov_type='HC3')
+beta_ols = res_ols.params[endogenous]
+
+# ---- 2SLS 估计 ----
+iv_formula = f"{outcome} ~ 1 + {' + '.join(controls)} + [{endogenous} ~ {' + '.join(instruments)}]"
+res_iv = IV2SLS.from_formula(iv_formula, data=df).fit(cov_type='robust')
+beta_iv = res_iv.params[endogenous]
+
+# ---- 倍增比计算 ----
+ratio = abs(beta_iv / beta_ols) if beta_ols != 0 else float('inf')
+print(f"OLS  β = {beta_ols:.4f}")
+print(f"2SLS β = {beta_iv:.4f}")
+print(f"|β_2SLS / β_OLS| = {ratio:.2f}")
+
+if ratio > 5:
+    print("⚠️  警告：倍增比 > 5，请检查：")
+    print("   1. 第一阶段 F 统计量是否充分（>104.7 for单工具）")
+    print("   2. Complier 群体是否具有特殊高效应特征（需论文中明确讨论）")
+    print("   3. 测量误差放大效应（Classical ME → attenuation in OLS → IV 反向放大）")
+elif ratio > 2:
+    print("⚠️  注意：倍增比 > 2，建议在论文中解释 LATE 超过 OLS 的经济学原因")
+else:
+    print("✓  倍增比在正常范围内")
+```
+
+```r
+# R: fixest feols vs feols with IV 对比 + 倍增比
+library(fixest)
+
+# OLS
+res_ols <- feols(
+  outcome ~ endogenous_x + control1 + control2 | unit_fe + time_fe,
+  data    = df,
+  cluster = ~cluster_var
+)
+
+# 2SLS（IV）
+res_iv <- feols(
+  outcome ~ control1 + control2 | unit_fe + time_fe | endogenous_x ~ z1 + z2,
+  data    = df,
+  cluster = ~cluster_var
+)
+
+# 提取系数
+beta_ols <- coef(res_ols)["endogenous_x"]
+beta_iv  <- coef(res_iv)["fit_endogenous_x"]
+
+ratio <- abs(beta_iv / beta_ols)
+cat(sprintf("OLS  β = %.4f\n", beta_ols))
+cat(sprintf("2SLS β = %.4f\n", beta_iv))
+cat(sprintf("|β_2SLS / β_OLS| = %.2f\n", ratio))
+
+if (ratio > 5) {
+  warning("倍增比 > 5！检查弱工具、Complier 特殊性和测量误差放大问题。")
+} else if (ratio > 2) {
+  message("注意：倍增比 > 2，请在论文中论证 LATE 超过 OLS 的原因。")
+}
+
+# 对比表
+etable(res_ols, res_iv,
+       headers = c("OLS", "2SLS"),
+       fitstat = ~ ivf + kpr + n)
+```
+
+---
+
+### Jackknife 影响力诊断
+
+逐一剔除每个聚类（或地区/行业单元），重新估计 2SLS 系数。若任何一次剔除导致系数变化 > 20%，说明结论对该聚类高度敏感，需在论文中讨论。
+
+**使用场景：**
+- 聚类数量较少（<50 个）时特别重要
+- 识别主要由少数大聚类驱动时（需检验）
+- 对 Shift-Share IV 结构尤其关键（某些行业权重过大）
+
+```python
+# Python: Jackknife 影响力诊断
+import numpy as np
+import pandas as pd
+from linearmodels.iv import IV2SLS
+
+clusters = df[cluster_var].unique()
+iv_formula = f"{outcome} ~ 1 + {' + '.join(controls)} + [{endogenous} ~ {' + '.join(instruments)}]"
+
+# 全样本基准估计
+res_full = IV2SLS.from_formula(iv_formula, data=df).fit(cov_type='robust')
+beta_full = res_full.params[endogenous]
+print(f"Full sample 2SLS β = {beta_full:.4f}")
+
+# Jackknife 循环
+jk_results = []
+for cl in clusters:
+    df_drop = df[df[cluster_var] != cl]
+    try:
+        res_jk = IV2SLS.from_formula(iv_formula, data=df_drop).fit(cov_type='robust')
+        beta_jk = res_jk.params[endogenous]
+        pct_change = abs(beta_jk - beta_full) / abs(beta_full) * 100
+        jk_results.append({
+            'dropped_cluster': cl,
+            'beta_jk': beta_jk,
+            'pct_change': pct_change,
+            'flag': '⚠️ >20%' if pct_change > 20 else ''
+        })
+    except Exception as e:
+        jk_results.append({'dropped_cluster': cl, 'beta_jk': np.nan,
+                           'pct_change': np.nan, 'flag': f'Error: {e}'})
+
+jk_df = pd.DataFrame(jk_results).sort_values('pct_change', ascending=False)
+print(jk_df.head(10).to_string(index=False))
+
+# 报告警告
+flagged = jk_df[jk_df['pct_change'] > 20]
+if len(flagged) > 0:
+    print(f"\n⚠️  警告：以下 {len(flagged)} 个聚类剔除后系数变化 >20%：")
+    print(flagged[['dropped_cluster', 'beta_jk', 'pct_change']].to_string(index=False))
+else:
+    print("\n✓  所有聚类剔除后系数变化均 ≤20%，结果稳健")
+
+jk_df.to_csv('output/iv_jackknife_cluster.csv', index=False)
+```
+
+```r
+# R: Jackknife 影响力诊断
+library(fixest)
+library(dplyr)
+
+# 全样本基准
+res_full <- feols(
+  outcome ~ control1 + control2 | unit_fe + time_fe | endogenous_x ~ z1 + z2,
+  data = df, cluster = ~cluster_var
+)
+beta_full <- coef(res_full)["fit_endogenous_x"]
+cat(sprintf("Full sample 2SLS β = %.4f\n", beta_full))
+
+# Jackknife 循环
+clusters <- unique(df$cluster_var)
+
+jk_results <- lapply(clusters, function(cl) {
+  df_drop <- df %>% filter(cluster_var != cl)
+  tryCatch({
+    res_jk <- feols(
+      outcome ~ control1 + control2 | unit_fe + time_fe | endogenous_x ~ z1 + z2,
+      data = df_drop, cluster = ~cluster_var
+    )
+    beta_jk    <- coef(res_jk)["fit_endogenous_x"]
+    pct_change <- abs(beta_jk - beta_full) / abs(beta_full) * 100
+    data.frame(dropped = cl, beta_jk = beta_jk, pct_change = pct_change,
+               flag = ifelse(pct_change > 20, "⚠️ >20%", ""))
+  }, error = function(e) {
+    data.frame(dropped = cl, beta_jk = NA, pct_change = NA, flag = "Error")
+  })
+}) |> bind_rows() |> arrange(desc(pct_change))
+
+print(head(jk_results, 10))
+
+# 警告提示
+flagged <- jk_results[!is.na(jk_results$pct_change) & jk_results$pct_change > 20, ]
+if (nrow(flagged) > 0) {
+  warning(sprintf("%d 个聚类剔除后系数变化 >20%%，需在论文中讨论", nrow(flagged)))
+  print(flagged)
+} else {
+  cat("✓ 所有聚类剔除后系数变化均 ≤20%\n")
+}
+
+write.csv(jk_results, "output/iv_jackknife_cluster.csv", row.names = FALSE)
+```
+
+---
+
+### DID 变量作 IV 的范式
+
+**适用场景：** 找不到传统 IV（地理/历史工具变量）时，利用政策冲击（policy shock）与行业/地区前定特征的交互项构造工具变量。本质是 Shift-Share 的简化版本。
+
+**构造方法：**
+
+$$Z_{it} = \text{PolicyShock}_t \times \text{PreChar}_i$$
+
+- $\text{PolicyShock}_t$：外生的政策时间冲击（如行业整体监管变化、全国性政策）
+- $\text{PreChar}_i$：个体 $i$ 的基期特征（固定，不受政策影响）——如行业类别、历史规模、初始杠杆率
+
+**识别逻辑：**
+- 相关性：基期特征决定了政策冲击对内生变量 $D$ 的影响程度（不同特征 → 不同力度）
+- 排他性：政策冲击对结果的影响只通过处理变量 $D$，不直接影响 $Y$（需论证）
+
+**识别假设强化检验：**
+1. 对不应受影响的结果变量做安慰剂检验
+2. 检验 $\text{PreChar}_i$ 在政策前与结果趋势的独立性（pre-trend of PreChar × time interaction）
+3. 配套 plausexog 检验（见下节）
+
+```r
+# R: DID变量作IV — 代码模板
+library(fixest)
+library(dplyr)
+
+# ---- 构造 IV：政策冲击 × 基期特征 ----
+# policy_shock: 政策年份哑变量（post=1），或更细粒度的政策力度
+# pre_char: 基期行业/地区特征（在政策前确定，此后不变）
+df <- df %>%
+  mutate(
+    iv_interact = policy_shock * pre_char_baseline  # 交互项 = IV
+  )
+
+# ---- 第一阶段检验 ----
+first_stage <- feols(
+  endogenous_x ~ iv_interact + control1 + control2 | unit_fe + time_fe,
+  data    = df,
+  cluster = ~cluster_var
+)
+cat("第一阶段 F 统计量（排除工具变量）:\n")
+fitstat(first_stage, type = "ivf")
+
+# ---- 2SLS 主估计 ----
+res_iv_did <- feols(
+  outcome ~ control1 + control2 | unit_fe + time_fe | endogenous_x ~ iv_interact,
+  data    = df,
+  cluster = ~cluster_var
+)
+summary(res_iv_did)
+fitstat(res_iv_did, type = c("ivf", "kpr"))
+
+# ---- 排他性安慰剂检验 ----
+# 用 IV 解释不相关的结果变量（应不显著）
+placebo_iv <- feols(
+  unrelated_outcome ~ control1 + control2 | unit_fe + time_fe | unrelated_x ~ iv_interact,
+  data    = df,
+  cluster = ~cluster_var
+)
+# 期望：coefficient on fit_unrelated_x ≈ 0
+
+# ---- 平行趋势检验（PreChar × Year 趋势）----
+df <- df %>% mutate(pre_char_x_year = pre_char_baseline * year)
+trend_check <- feols(
+  outcome ~ pre_char_x_year + control1 | unit_fe + year_fe,
+  data   = df %>% filter(post == 0),  # 仅政策前样本
+  cluster = ~cluster_var
+)
+# 期望：pre_char_x_year 系数不显著（基期特征与结果趋势无关）
+```
+
+---
+
+### plausexog 不完全外生 IV 检验
+
+当排他性约束可能存在小幅违反时（$Z$ 对 $Y$ 有直接效应 $\delta$），Union of Confidence Intervals（UCI）方法在假定 $\delta \in [-\delta_0, \delta_0]$ 下计算 $\beta$ 的稳健区间。
+
+**UCI 方法说明：**
+1. 研究者基于领域知识设定直接效应的上界 $\delta_0$（关键假设，需论证）
+2. 对 $\delta$ 网格中的每个值，计算条件 CI
+3. 取所有 CI 的并集（union），得到稳健置信区间
+4. 若并集 CI 仍不包含零，结论对排他性约束的小幅违反稳健
+
+**参数设定指南：**
+- $\delta_0$ 的选择：参考直接效应渠道的量级估计（如控制直接渠道后系数变化量）
+- 从保守的大 $\delta_0$ 开始，逐步缩小，找到结论转折点（"临界 $\delta_0$"）
+
+```r
+# R: plausexog UCI 方法（手动实现 + sensemakr）
+library(AER)
+library(tidyverse)
+
+# ---- 方法1：UCI 手动扫描 ----
+# 假定 Z 对 Y 的直接效应 δ 在 [-δ₀, δ₀] 内
+delta0 <- 0.05  # 根据领域知识设定
+delta_grid <- seq(-delta0, delta0, length.out = 41)
+
+bounds_df <- map_dfr(delta_grid, function(d) {
+  # 从结果中减去直接效应，再做 IV
+  df_adj <- df %>% mutate(y_adj = outcome - d * instrument)
+
+  res <- ivreg(
+    y_adj ~ endogenous_x + control1 + control2 |
+              instrument + control1 + control2,
+    data = df_adj
+  )
+  ci <- confint(res)["endogenous_x", ]
+  tibble(delta = d,
+         beta  = coef(res)["endogenous_x"],
+         lo    = ci[1], hi = ci[2])
+})
+
+# 并集 CI（UCI）
+uci_lo <- min(bounds_df$lo)
+uci_hi <- max(bounds_df$hi)
+cat(sprintf("UCI 稳健区间: [%.4f, %.4f]\n", uci_lo, uci_hi))
+
+if (uci_lo > 0 | uci_hi < 0) {
+  cat("✓ 在 δ ∈ [-δ₀, δ₀] 假设下，结论稳健（区间不含0）\n")
+} else {
+  cat("⚠️ 区间包含0，结论对排他性违反敏感\n")
+}
+
+# 可视化
+ggplot(bounds_df, aes(x = delta)) +
+  geom_ribbon(aes(ymin = lo, ymax = hi), alpha = 0.2, fill = "steelblue") +
+  geom_line(aes(y = beta), color = "steelblue", linewidth = 1) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
+  geom_hline(yintercept = uci_lo, linetype = "dotted") +
+  geom_hline(yintercept = uci_hi, linetype = "dotted") +
+  labs(
+    title    = "plausexog UCI：排他性约束敏感性分析",
+    subtitle = sprintf("假设直接效应 δ ∈ [−%.2f, %.2f]", delta0, delta0),
+    x        = "直接效应假设值 δ",
+    y        = "IV 估计 β"
+  ) +
+  theme_minimal()
+ggsave("output/iv_plausexog_uci.png", dpi = 150)
+
+# ---- 方法2：sensemakr（更系统的敏感性分析）----
+# install.packages("sensemakr")
+library(sensemakr)
+
+# 以 OLS 作为基础，分析工具变量直接效应的等价混淆强度
+base_ols <- lm(outcome ~ endogenous_x + instrument + control1 + control2, data = df)
+sens <- sensemakr(
+  model               = base_ols,
+  treatment           = "instrument",       # 关注 Z 的直接效应
+  benchmark_covariates = "control1",        # 以已知控制变量为基准
+  kd                  = 1:3
+)
+plot(sens)    # 等高线图：多强的混淆才能推翻结论
+summary(sens) # Robustness value（最小影响力）
+
+# ---- 参数设定结果解读 ----
+# 1. 绘制"β 随 δ 变化"图，找到 β 转变符号的临界 δ_crit
+delta_crit <- bounds_df %>%
+  filter(sign(beta) != sign(bounds_df$beta[bounds_df$delta == 0])) %>%
+  summarise(delta_crit = min(abs(delta))) %>%
+  pull()
+cat(sprintf("结论转折临界值 δ_crit ≈ %.4f\n", delta_crit))
+cat(sprintf("即：若 Z 对 Y 的直接效应小于 %.4f，结论不变\n", delta_crit))
+```
+
+---
+
+### Lee Bounds
+
+Lee Bounds（Lee 2009）是 plausexog 的替代方案，适用于**样本选择性缺失（selective attrition）**导致排他性约束受损的情形——例如工具变量影响了"是否被观测到"，从而间接影响了结果。
+
+**核心思想：**
+- 在单调性假设下，通过对处理组和控制组的尾部删减（trimming）构造处理效应的上界和下界
+- Upper bound：删减处理组最差结果后估计
+- Lower bound：删减处理组最好结果后估计
+
+**适用条件：**
+- Fuzzy RDD 或 IV 设计中存在样本选择性流失（attrition）
+- 单调性假设（monotonicity）成立
+
+```r
+# R: Lee Bounds 代码框架
+# install.packages("leebounds")
+library(leebounds)
+library(dplyr)
+
+# ---- 基本 Lee Bounds ----
+# 需要变量：
+#   S: 样本选择指示（1=被观测到，0=缺失）
+#   Y: 结果变量（仅对 S=1 观测）
+#   D: 处理变量（工具变量/随机分配）
+
+lee_res <- leebounds(
+  s = df$selected,     # 样本选择变量（1=进入样本）
+  y = df$outcome,      # 结果变量
+  d = df$treatment     # 处理/工具变量
+)
+print(lee_res)
+# 输出：Lower bound, Upper bound, 点估计（假设同质效应时）
+
+# ---- 带协变量的 Lee Bounds（tighter bounds）----
+# 协变量可以收紧 bounds，但需假设协变量与选择机制独立
+lee_cov <- leebounds(
+  s      = df$selected,
+  y      = df$outcome,
+  d      = df$treatment,
+  stratify_by = df$stratum  # 按子层做 bounds，再合并
+)
+print(lee_cov)
+
+# ---- 结果报告 ----
+cat(sprintf("Lee Bounds: [%.4f, %.4f]\n",
+            lee_res$lower_bound, lee_res$upper_bound))
+cat(sprintf("若两端均显著异于0，结论对选择性缺失稳健\n"))
+
+# 与主 IV 估计对比
+cat(sprintf("主 2SLS 估计: %.4f\n", beta_iv))
+cat(sprintf("Lee Lower:    %.4f\n", lee_res$lower_bound))
+cat(sprintf("Lee Upper:    %.4f\n", lee_res$upper_bound))
+```
+
+---
+
+### 同行业剩余均值型 IV
+
+**核心思想：** 剔除个体自身后，用同行业（或同地区）其他个体的均值作为工具变量。常用于处理**网络效应内生性**、**同伴效应**或**行业均值混淆**。
+
+**识别逻辑：**
+- 相关性：行业/地区均值与个体的内生变量高度相关（行业普遍受到外部冲击）
+- 排他性：剔除自身后的均值不直接影响个体结果（无反向因果；需论证无明显溢出效应）
+
+**常见应用：**
+- 企业融资成本的行业同期均值（剔除本企业）→ 作为融资约束的 IV
+- 地区工资均值（剔除本人）→ 作为个人工资方程的 IV
+- 银行同业拆借利率均值（剔除本行）→ 作为银行风险的 IV
+
+```python
+# Python: 同行业剩余均值型 IV（leave-self-out mean）
+import pandas as pd
+import numpy as np
+from linearmodels.iv import IV2SLS
+
+# 假设数据：df 含 firm_id, industry_id, year, endogenous_x, outcome, controls
+
+# ---- 构造 leave-self-out 行业均值 IV ----
+# 方法：行业均值 - 本企业贡献
+df['industry_sum']   = df.groupby(['industry_id', 'year'])['endogenous_x'].transform('sum')
+df['industry_count'] = df.groupby(['industry_id', 'year'])['endogenous_x'].transform('count')
+
+# leave-self-out mean = (行业总和 - 自身值) / (行业个数 - 1)
+df['iv_leave_out'] = (df['industry_sum'] - df['endogenous_x']) / (df['industry_count'] - 1)
+
+# 若行业只有自身（单独个体），leave-out mean 为 NaN → 剔除
+df = df.dropna(subset=['iv_leave_out'])
+
+# ---- 2SLS 估计 ----
+df_iv = df.set_index(['firm_id', 'year'])
+formula = f"{outcome} ~ 1 + EntityEffects + TimeEffects + {' + '.join(controls)} + [{endogenous} ~ iv_leave_out]"
+res = IV2SLS.from_formula(formula, data=df_iv).fit(
+    cov_type='clustered',
+    clusters=df_iv.index.get_level_values('firm_id')
+)
+print(res.summary)
+
+# ---- 诊断：第一阶段 F ----
+print(f"First Stage F: {res.first_stage.diagnostics['f.stat']:.2f}")
+```
+
+```r
+# R: 同行业剩余均值型 IV（通用代码）
+library(fixest)
+library(dplyr)
+
+# ---- 构造 leave-self-out 均值 ----
+df <- df %>%
+  group_by(industry_id, year) %>%
+  mutate(
+    industry_sum   = sum(endogenous_x, na.rm = TRUE),
+    industry_count = sum(!is.na(endogenous_x)),
+    # Leave-self-out mean
+    iv_leave_out   = (industry_sum - endogenous_x) / (industry_count - 1)
+  ) %>%
+  ungroup() %>%
+  filter(industry_count > 1)  # 需要至少2家企业才能构造均值
+
+# ---- 检验：IV 与内生变量的相关性 ----
+cor_check <- cor(df$iv_leave_out, df$endogenous_x, use = "complete.obs")
+cat(sprintf("IV 与内生变量相关系数: %.4f\n", cor_check))
+
+# ---- 2SLS 主估计 ----
+res_iv_leave <- feols(
+  outcome ~ control1 + control2 | firm_fe + year_fe | endogenous_x ~ iv_leave_out,
+  data    = df,
+  cluster = ~industry_id  # 在行业层面聚类（考虑同行业相关性）
+)
+summary(res_iv_leave)
+fitstat(res_iv_leave, type = c("ivf", "kpr", "n"))
+
+# ---- 稳健性：按地区构造 leave-self-out ----
+# （同理，只需将 group_by 中的 industry_id 改为 region_id）
+df <- df %>%
+  group_by(region_id, year) %>%
+  mutate(iv_region_leave = (sum(endogenous_x) - endogenous_x) / (n() - 1)) %>%
+  ungroup()
+```
+
+---
+
+### Complier 特征描述模板
+
+IV/2SLS 识别的是 **Complier 群体**（当工具变量 Z 发生变化时，处理变量 D 随之改变的个体）。论文中**必须明确描述 Complier 的特征**，否则读者无法评估 LATE 的外部效度。
+
+**自动生成 Complier 描述文字的代码：**
+
+```r
+# R: 自动生成 Complier 特征描述
+# 方法：Abadie (2003) κ-weighting — 用 IV 加权估计 Complier 群体的协变量均值
+
+library(fixest)
+library(dplyr)
+
+# 步骤1：估计倾向得分 P(Z=1|X)（IV 取值=1 的概率）
+ps_model <- glm(instrument ~ control1 + control2 + covariate1 + covariate2,
+                data = df, family = binomial())
+df$pz <- predict(ps_model, type = "response")
+
+# 步骤2：构造 Abadie kappa 权重
+# κ = 1 - D(1-Z)/(1-P(Z)) - (1-D)Z/P(Z)
+df <- df %>%
+  mutate(
+    kappa = 1 -
+      (endogenous_x * (1 - instrument)) / (1 - pz) -
+      ((1 - endogenous_x) * instrument) / pz
+  )
+
+# 步骤3：用 κ 加权估计 Complier 均值（vs 总体均值）
+covariates_to_describe <- c("age", "firm_size", "leverage", "region_dummy")
+
+complier_profile <- sapply(covariates_to_describe, function(cov) {
+  complier_mean <- weighted.mean(df[[cov]], w = df$kappa, na.rm = TRUE)
+  overall_mean  <- mean(df[[cov]], na.rm = TRUE)
+  ratio         <- complier_mean / overall_mean
+  c(complier_mean = complier_mean, overall_mean = overall_mean, ratio = ratio)
+})
+
+print(round(t(complier_profile), 3))
+
+# 步骤4：自动生成描述文字
+cat("\n=== Complier 群体特征描述（可直接粘贴至论文）===\n\n")
+cat(sprintf(
+  "本文工具变量 [%s] 识别的是当 [%s] 发生变化时处理状态随之改变的 Complier 群体。\n",
+  "IV名称", "Z变动方向描述"
+))
+cat(sprintf(
+  "相较于总体样本，Complier 群体在以下方面存在系统性差异：\n"
+))
+
+for (cov in covariates_to_describe) {
+  ratio <- complier_profile["ratio", cov]
+  direction <- ifelse(ratio > 1, "高于", "低于")
+  cat(sprintf("  - %s 均值比总体样本 %s %.1f%%（Complier: %.3f，总体: %.3f）\n",
+              cov, direction, abs(ratio - 1) * 100,
+              complier_profile["complier_mean", cov],
+              complier_profile["overall_mean", cov]))
+}
+
+cat(sprintf(
+  "\n因此，本文 2SLS 估计的 LATE 代表 [经济学解释Complier特征] 群体的处理效应，\n",
+))
+cat("  其政策含义主要适用于该群体，不能直接外推至 Never-taker 或 Always-taker。\n")
+```
+
+---
+
+### 错误 7 补充
+
+> **错误 7：不说明 IV 识别的是谁的效应**
+>
+> 2SLS / IV 估计的是 **LATE（Local Average Treatment Effect）**，即 Complier 群体的平均处理效应。在论文中**必须明确讨论**以下三点：
+>
+> 1. **谁是 Complier？** 当工具变量 Z 从 0 变为 1 时，哪类个体的处理状态 D 随之变化？用数据描述其可观测特征（年龄、规模、地区等）。
+>
+> 2. **LATE 与 ATE/ATT 的关系：** 如果研究问题关心总体 ATE，需要额外论证为何 Complier 的效应能代表总体——或明确声明 LATE 的局限性。
+>
+> 3. **不同 IV 识别不同 LATE：** 当文章使用多个工具变量时，每个 IV 识别的是不同的 Complier 子群体，估计量自然不同，这不是矛盾而是**异质性的证据**。
+
+**论文写作模板：**
+```
+"本文工具变量 [Z] 识别的是 [Complier 定义，如：因地理距离降低而开始使用金融服务的企业]。
+这一群体在 [特征维度] 上与总体样本存在 [差异描述]（见表 X），
+因此本文 2SLS 估计量代表该 Complier 群体的 LATE，
+其推广到 [Never-taker 群体] 需要额外假设。"
+```
+
+---
+
+### Estimand 声明
+
+**IV / 2SLS → LATE（Compliers 的效应）**
+
+在论文中，每次报告 IV/2SLS 结果时，**必须**包含以下声明：
+
+| 声明项目 | 内容要求 |
+|----------|---------|
+| 估计量定义 | 明确标注"本文 IV 估计量为 LATE（局部平均处理效应）" |
+| Complier 群体 | 描述当 Z 变动时处理状态改变的个体特征（用数据刻画） |
+| 外部效度边界 | 声明 LATE 不等于 ATE，不适用于 Always-taker 和 Never-taker |
+| 不同 IV 的比较 | 若使用多个 IV，解释估计量差异来自不同 Complier 群体 |
+
+**标准声明模板（论文脚注或正文）：**
+```
+本文 2SLS 估计量识别的是工具变量 [Z名称] 下的局部平均处理效应（LATE），
+即当 [Z描述] 时处理状态随之改变的 Complier 群体的平均效应。
+该群体的特征详见表 [X]（Complier 特征分析）。
+LATE 不能直接外推至总体平均处理效应（ATE），
+政策含义主要适用于类似 Complier 特征的群体。
+```
