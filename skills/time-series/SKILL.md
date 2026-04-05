@@ -2,7 +2,7 @@
 
 ## 概述
 
-本 skill 提供宏观经济学与金融实证研究中标准时间序列分析流程，涵盖单位根检验、协整检验、VAR/VECM 模型、格兰杰因果、ARDL 模型、脉冲响应函数及结构突变检验，支持 Python / R / Stata 三种工具。
+本 skill 提供宏观经济学与金融实证研究中标准时间序列分析流程，涵盖单位根检验、协整检验、VAR/VECM 模型、格兰杰因果、ARDL 模型、脉冲响应函数及结构突变检验，支持 Python / R 两种工具。
 
 **适用场景**：
 - 宏观经济变量的时间序列性质检验（平稳性）
@@ -19,7 +19,7 @@
 |------|--------|
 | Python | `statsmodels >= 0.14`, `pandas`, `numpy`, `matplotlib` |
 | R | `urca`, `tseries`, `vars`, `tsDyn`, `strucchange`, `mFilter` |
-| Stata | `dfuller`, `pperron`, `varsoc`, `var`, `vec`, `irf` 内置；`egranger`（ssc install）|
+| Stata | 不使用 Stata |
 
 数据要求：
 - 时间序列已按时间顺序排列
@@ -112,6 +112,34 @@ def kpss_test(series, name="", regression="ct"):
 kpss_test(df["gdp"], name="GDP (level)")
 ```
 
+#### Zivot-Andrews 检验（含结构突变的单位根）
+
+当序列可能存在结构突变时，ADF 检验会低估平稳性，应补充 Zivot-Andrews 检验。
+
+```python
+from statsmodels.tsa.stattools import zivot_andrews
+
+def za_test(series, name="", trim=0.15):
+    """
+    Zivot-Andrews 单位根检验（允许单个结构突变）
+    原假设：序列有单位根且无结构突变
+    """
+    result = zivot_andrews(series.dropna(), trim=trim,
+                            regression="ct",   # 截距+趋势
+                            autolag="AIC")
+    za_stat, p_val, crit_vals, base_time, _ = result
+    print(f"\nZivot-Andrews Test: {name}")
+    print(f"  ZA Statistic : {za_stat:.4f}")
+    print(f"  p-value      : {p_val:.4f}")
+    print(f"  Break Date   : {base_time}")
+    print(f"  Critical Values: 1%: {crit_vals[0]:.4f}, 5%: {crit_vals[1]:.4f}, 10%: {crit_vals[2]:.4f}")
+    conclusion = "Stationary (with break)" if p_val < 0.05 else "Non-stationary (unit root)"
+    print(f"  Conclusion   : {conclusion}")
+    return {"stat": za_stat, "p": p_val, "break_date": base_time}
+
+za_test(df["gdp"], name="GDP")
+```
+
 **R**
 ```r
 library(urca)
@@ -146,25 +174,6 @@ unit_root_table <- function(series_list, names) {
 }
 ```
 
-**Stata**
-```stata
-* ADF 检验
-dfuller gdp, trend lags(4) regress
-dfuller d.gdp, trend lags(3) regress    // 一阶差分
-
-* PP 检验
-pperron gdp, trend lags(4)
-
-* KPSS 检验（需安装）
-* ssc install kpss
-kpss gdp, trend
-
-* 批量检验
-foreach v in gdp m2 cpi investment {
-    dfuller `v', trend lags(4)
-    dfuller d.`v', trend lags(3)
-}
-```
 
 **检验结论矩阵**（通常整理为表格展示）：
 
@@ -199,7 +208,9 @@ from statsmodels.tsa.vector_ar.vecm import coint_johansen
 
 def johansen_test(df_vars, det_order=0, k_ar_diff=1):
     """
-    det_order: -1=无截距, 0=截距不在协整方程, 1=截距在协整方程
+    det_order: -1 = 无确定性项
+              0 = 限制常数项（restricted constant, Case 2）
+              1 = 线性趋势（Case 4）
     k_ar_diff: VAR 滞后阶数（差分形式，VAR(p) 对应 k_ar_diff=p-1）
     """
     result = coint_johansen(df_vars.dropna(), det_order=det_order, k_ar_diff=k_ar_diff)
@@ -233,12 +244,6 @@ jo <- ca.jo(vars_matrix, type = "trace", K = 2,
 summary(jo)
 ```
 
-**Stata**
-```stata
-* Johansen 协整检验
-vecrank gdp m2 cpi, trend(constant) lags(2)
-* 输出：迹统计量和最大特征值统计量，及不同协整秩下的选择
-```
 
 ---
 
@@ -255,13 +260,17 @@ lag_order = model_order.select_order(maxlags=8)
 print(lag_order.summary())   # AIC、BIC、HQIC 选择最优滞后
 
 # 估计 VAR(p)
-p_opt = lag_order.aic        # 使用 AIC 准则
+p_opt = lag_order.selected_orders['aic']  # 使用 AIC 准则
 var_model = model_order.fit(p_opt, trend="c")
 print(var_model.summary())
 
 # 残差诊断
 var_model.test_normality()   # 残差正态性
 var_model.test_whiteness(nlags=10)  # Portmanteau 白噪声检验
+
+# VAR 稳定性检验（所有特征根模应在单位圆内）
+print("VAR 稳定性:", var_model.is_stable())
+# 若 is_stable() 返回 False，需增加滞后阶数或重新设定模型
 ```
 
 **R (vars)**
@@ -280,19 +289,13 @@ summary(var_model)
 serial.test(var_model, lags.pt = 12, type = "PT.asymptotic")  # 序列相关
 arch.test(var_model, lags.multi = 5)                           # ARCH 效应
 normality.test(var_model)                                      # 正态性
+
+# VAR 稳定性检验（特征根应在单位圆内）
+roots(var_model)         # 返回各特征根模，应全部 < 1
+# 或可视化：
+# plot(stability(var_model, type = "OLS-CUSUM"))
 ```
 
-**Stata**
-```stata
-* VAR 滞后阶数选择
-varsoc d_gdp d_m2 d_cpi, maxlag(8)
-
-* 估计 VAR(2)
-var d_gdp d_m2 d_cpi, lags(1/2)
-
-* 稳定性检验（特征根在单位圆内）
-varstable, graph
-```
 
 ---
 
@@ -319,11 +322,6 @@ vecm_model <- VECM(df_vars, lag = 1, r = 1, estim = "ML",
 summary(vecm_model)
 ```
 
-**Stata**
-```stata
-* 估计 VECM（协整秩 = 1）
-vec gdp m2 cpi, trend(constant) rank(1) lags(2)
-```
 
 ---
 
@@ -332,12 +330,14 @@ vec gdp m2 cpi, trend(constant) rank(1) lags(2)
 ```python
 from statsmodels.tsa.stattools import grangercausalitytests
 
-def granger_test_matrix(df_vars, maxlag=4):
-    """生成格兰杰因果检验矩阵（F 检验）"""
+def granger_test_matrix(df_vars, opt_lag=2):
+    """
+    生成格兰杰因果检验矩阵（F 检验）
+    opt_lag: 由 VAR 信息准则确定的最优滞后阶数（推荐统一使用，避免多重检验问题）
+    注：不应对各滞后取 min(p)——这会导致多重检验膨胀，应在最优滞后处单次检验。
+    """
     cols = df_vars.columns.tolist()
-    n = len(cols)
-    results = pd.DataFrame(index=cols, columns=cols,
-                            dtype=object).fillna("")
+    results = pd.DataFrame(index=cols, columns=cols, dtype=object).fillna("")
 
     for i, y in enumerate(cols):
         for j, x in enumerate(cols):
@@ -345,17 +345,17 @@ def granger_test_matrix(df_vars, maxlag=4):
                 results.loc[y, x] = "—"
                 continue
             test_data = df_vars[[y, x]].dropna()
-            gc = grangercausalitytests(test_data, maxlag=maxlag, verbose=False)
-            # 取最小 p 值
-            p_vals = [gc[lag][0]["ssr_ftest"][1] for lag in range(1, maxlag+1)]
-            min_p = min(p_vals)
-            sig = "***" if min_p < 0.01 else ("**" if min_p < 0.05
-                  else ("*" if min_p < 0.10 else ""))
-            results.loc[y, x] = f"{min_p:.3f}{sig}"
+            gc = grangercausalitytests(test_data, maxlag=opt_lag, verbose=False)
+            # 在最优滞后处单次检验（非取最小值）
+            p_val = gc[opt_lag][0]["ssr_ftest"][1]
+            sig = "***" if p_val < 0.01 else ("**" if p_val < 0.05
+                  else ("*" if p_val < 0.10 else ""))
+            results.loc[y, x] = f"{p_val:.3f}{sig}"
 
     return results
 
-gc_matrix = granger_test_matrix(df_stationary[["d_gdp","d_m2","d_cpi"]], maxlag=4)
+# opt_lag 应来自 VAR 模型的信息准则（AIC/BIC）
+gc_matrix = granger_test_matrix(df_stationary[["d_gdp","d_m2","d_cpi"]], opt_lag=2)
 print("格兰杰因果检验矩阵（p 值，行被列格兰杰导致）:")
 print(gc_matrix)
 ```
@@ -369,11 +369,6 @@ causality(var_model, cause = "d_m2")$Granger
 # H0: d_m2 不格兰杰导致其他变量
 ```
 
-**Stata**
-```stata
-* VAR 后格兰杰因果检验
-vargranger
-```
 
 ---
 
@@ -383,12 +378,23 @@ vargranger
 # Cholesky 分解正交化 IRF
 irf_result = var_model.irf(periods=12)  # 12 期 IRF
 
-# 绘制 IRF
+# 绘制 IRF（Cholesky 正交化）
 fig = irf_result.plot(impulse="d_m2", response="d_gdp",
-                       orth=True,    # 正交化
+                       orth=True,    # 正交化 (Cholesky)
                        cumsum=False)
+
+# GIRF（广义脉冲响应，不依赖 Cholesky 排序）
+irf_girf = var_model.irf(periods=12)
+fig_girf = irf_girf.plot(impulse="d_m2", response="d_gdp",
+                          orth=False,   # 非正交化 = GIRF
+                          cumsum=False)
 plt.suptitle("IRF: Response of GDP to M2 Shock", fontsize=14)
 plt.savefig("output/figures/irf_m2_to_gdp.pdf", dpi=300, bbox_inches="tight")
+
+# Cholesky 排序说明：从最外生到最内生
+# 示例：[货币政策] → [产出] → [价格]（货币政策最外生，价格最内生）
+# 稳健性：尝试不同排序，对比 IRF 形状差异
+# 替代方案：使用上方 GIRF（orth=False）或估计 SVAR 施加结构约束
 
 # 方差分解（FEVD）
 fevd = var_model.fevd(10)
@@ -410,24 +416,46 @@ plot(irf_result)
 # 方差分解
 fevd_result <- fevd(var_model, n.ahead = 10)
 plot(fevd_result)
+
+# GIRF（广义脉冲响应，不依赖 Cholesky 排序）
+irf_generalized <- irf(var_model, impulse = "d_m2", response = "d_gdp",
+                        n.ahead = 12, ortho = FALSE,
+                        boot = TRUE, ci = 0.95, runs = 1000)
+plot(irf_generalized)
 ```
 
-**Stata**
-```stata
-* 估计 IRF（先建立 IRF 文件）
-irf create myirf, step(12) set(myirf) replace
-
-* 绘制 IRF
-irf graph oirf, impulse(d_m2) response(d_gdp)    ///
-    yline(0) xlabel(0(1)12)                        ///
-    title("Response of GDP to M2 Shock")
-graph export "output/figures/irf_m2_gdp.pdf", replace
-
-* 方差分解
-irf table fevd
-```
 
 ---
+
+
+### 步骤 6.5：LP-IRF（Local Projections，Jordà 2005）
+
+LP-IRF 通过直接回归得到脉冲响应，对 VAR 模型设定误差更稳健。
+
+```r
+# R: 使用 lpirfs 包
+# install.packages("lpirfs")
+library(lpirfs)
+
+# 线性 LP-IRF
+lp_result <- lp_lin(
+  endog_data = df_stationary,
+  lags_endog_lin = 2,
+  trend = 0,
+  shock_type = 1,       # 标准差单位冲击
+  confint = 1.96,       # 95% CI
+  hor = 12              # 12 期
+)
+plot(lp_result)
+
+# 手动实现（fixest + 循环，适合带控制变量的情形）
+# library(fixest)
+# lp_coefs <- sapply(0:12, function(h) {
+#   df_h <- df_stationary
+#   df_h$y_ahead <- dplyr::lead(df_h$d_gdp, h)
+#   coef(feols(y_ahead ~ d_m2 + l(d_gdp, 1:2) + l(d_m2, 1:2), data = df_h))["d_m2"]
+# })
+```
 
 ### 步骤 7：ARDL 模型（Autoregressive Distributed Lag）
 
@@ -437,7 +465,7 @@ irf table fevd
 # Python: ardl 包
 # pip install ardl
 # 或使用 statsmodels ARDL（>=0.14）
-from statsmodels.tsa.ardl import ARDL, ardl_select_order, bounds_test
+from statsmodels.tsa.ardl import ARDL, ardl_select_order, UECM
 
 # 自动选择滞后阶数
 res_order = ardl_select_order(
@@ -460,7 +488,10 @@ ardl_fit = ardl_model.fit()
 print(ardl_fit.summary())
 
 # Bounds 检验（协整边界检验）
-bounds = bounds_test(ardl_fit, case=3, alpha=0.05)
+# 注：statsmodels >= 0.14 中 bounds_test 已移至 UECM 接口
+uecm = UECM.from_ardl(ardl_model)
+uecm_fit = uecm.fit()
+bounds = uecm_fit.bounds_test(case=3)
 print(bounds)
 ```
 
@@ -484,13 +515,6 @@ bounds_result <- bounds_f_test(ardl_model, case = 3)
 print(bounds_result)
 ```
 
-**Stata**
-```stata
-* ssc install ardl
-ardl gdp m2 cpi, aic maxlag(4)       // 自动选择 + AIC
-* 边界检验
-estat btest
-```
 
 ---
 
@@ -529,23 +553,39 @@ plot(cusum_test)
 sctest(cusum_test)     # 正式检验统计量
 ```
 
-**Stata**
-```stata
-* Chow 检验（已知突变点，如 2008 年）
-gen post2008 = (year > 2008)
-reg gdp m2 cpi
-* 使用 estat sbknown（已知突变点）
-estat sbknown, breakpoint(2008)
-
-* 未知突变点：Quandt-Andrews 检验
-estat sbsingle
-
-* Bai-Perron（多个突变点）
-* ssc install sbsingle
-sbsingle gdp m2 cpi, trim(0.15) max_breaks(5)
-```
 
 ---
+
+
+---
+
+## 自动化决策树：模型选择
+
+根据单位根检验和协整检验结果，按以下流程选择模型：
+
+```
+所有变量均为 I(0)（水平平稳）
+    └→ VAR（水平值）
+
+所有变量均为 I(1)
+    ├→ 存在协整关系（Johansen 检验显著）
+    │       └→ VECM
+    └→ 无协整关系
+            └→ 差分后 VAR（对 ΔX 建模）
+
+变量积分阶数混合（I(0) 和 I(1) 并存）
+    └→ ARDL + Bounds Test（Pesaran et al., 2001）
+
+序列存在结构突变（Bai-Perron / Zivot-Andrews 检验显著）
+    └→ 分段处理（加入突变虚拟变量，或对各段分别估计）
+        或 → Markov-Switching VAR（非线性）
+```
+
+**实操建议**：
+1. 先对每个变量分别做 ADF + PP + KPSS + Zivot-Andrews，确认积分阶数。
+2. 如存在 I(1) 变量，做 Johansen 或 EG 协整检验。
+3. 按上方决策树选择模型。
+4. 估计后做残差诊断（序列相关、正态性）和稳定性检验（VAR 特征根 / CUSUM）。
 
 ## 检验清单
 
@@ -570,6 +610,24 @@ sbsingle gdp m2 cpi, trim(0.15) max_breaks(5)
 6. **格兰杰因果 ≠ 经济因果**：格兰杰因果是预测意义上的先验信息，不是结构因果，切勿在文章中混淆。
 
 ---
+
+
+---
+
+## Estimand 声明
+
+时间序列模型估计的因果量因方法不同而异。在论文中必须明确声明：
+
+| 方法 | Estimand | 必须声明 |
+|------|----------|---------|
+| VAR（差分后） | 短期动态乘数 ΔY_t+h / Δε_t | 冲击标准化方式（Cholesky/GIRF/SVAR） |
+| VECM | 长期均衡系数 + 误差修正速度 α | 协整向量标准化约束 |
+| ARDL Bounds | 短期系数 + 长期系数 β/(1-ρ) | 明确区分短期与长期 |
+| IRF（Cholesky） | 排序依赖的脉冲响应 | 排序经济依据 + GIRF 稳健性 |
+| LP-IRF | 直接估计 h 期后脉冲响应 | 是否控制了混淆动态路径 |
+| 格兰杰因果 | 预测意义上的先验信息，非结构因果 | 明确声明不等于经济因果 |
+
+**重要提示**：时间序列模型通常估计"动态关联"而非因果效应。若要主张因果，需要额外的外生性论证（如利率的外生货币政策冲击、自然实验等）。
 
 ## 输出规范
 

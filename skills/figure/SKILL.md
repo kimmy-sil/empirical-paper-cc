@@ -20,7 +20,7 @@
 |------|--------|
 | Python | `matplotlib >= 3.5`, `seaborn`, `numpy`, `pandas` |
 | R | `ggplot2`, `ggthemes`, `coefplot`, `rdplot`（rdrobust） |
-| Stata | `coefplot`（ssc install）, `event_plot`（ssc install）, `graph` 内置 |
+| Stata | 不使用 Stata |
 
 **图表规范（全局）**：
 - 字号：轴标签 ≥ 12pt，标题 ≥ 14pt，图例 ≥ 11pt
@@ -148,21 +148,6 @@ plot_event_study_r <- function(event_study_df, baseline = -1) {
 }
 
 ggsave("output/figures/event_study.pdf", width = 8, height = 5)
-```
-
-**Stata (event_plot)**
-```stata
-* 需先安装: ssc install event_plot
-* 假设已用 reghdfe 估计 DiD 动态效应，结果存在 e()
-
-event_plot, default_look           ///
-    graph_opt(                     ///
-        xtitle("Periods Relative to Treatment")   ///
-        ytitle("Coefficient")      ///
-        yline(0, lp(dash) lc(gray))              ///
-        xlabel(-4(1)4)             ///
-    )
-graph export "output/figures/event_study.pdf", replace
 ```
 
 ---
@@ -305,9 +290,9 @@ def plot_distribution(df, var, group_col=None, save_path=None, figsize=(7, 4)):
 def plot_scatter_fit(df, x_var, y_var, save_path=None, figsize=(7, 5)):
     from numpy.polynomial.polynomial import polyfit
 
-    x = df[x_var].dropna()
-    y = df[[x_var, y_var]].dropna()[y_var]
-    x = df[[x_var, y_var]].dropna()[x_var]
+    df_clean = df[[x_var, y_var]].dropna()
+    x = df_clean[x_var]
+    y = df_clean[y_var]
 
     # OLS 拟合线
     from scipy.stats import linregress
@@ -392,6 +377,8 @@ rdplot(y = df$outcome, x = df$running_var, c = 0,
        y.label = "Outcome")
 ```
 
+> **注**：上方 Python `plot_rdd` 为简化版等宽分箱，推荐用 R `rdplot` 获得标准结果（自动最优分箱 + 置信带）。
+
 ---
 
 ### 步骤 7：合成控制法图（Path Plot + Gap Plot）
@@ -409,14 +396,12 @@ def plot_synthetic_control(
     """
     # 计算合成控制值
     if weights:
-        donor_units = [u for u in weights.keys()]
-        synth_values = (
-            df_wide[df_wide[unit_col].isin(donor_units)]
-            .assign(weighted_outcome=lambda x: x.apply(
-                lambda row: row[outcome_col] * weights.get(row[unit_col], 0), axis=1))
-            .groupby(time_col)["weighted_outcome"]
-            .sum()
-        )
+        donor_units = list(weights.keys())
+        weight_series = pd.Series(weights)  # unit -> weight
+        donor_df = df_wide[df_wide[unit_col].isin(donor_units)].copy()
+        donor_df["weight"] = donor_df[unit_col].map(weight_series)
+        donor_df["weighted_outcome"] = donor_df[outcome_col] * donor_df["weight"]
+        synth_values = donor_df.groupby(time_col)["weighted_outcome"].sum()
     else:
         # 简化：未加权平均（仅演示）
         donor_mask = df_wide[unit_col] != treated_unit
@@ -488,6 +473,9 @@ plt.rcParams.update({
     "pdf.fonttype": 42,           # 嵌入字体（避免 reviewer 乱码）
     "ps.fonttype": 42,
 })
+# 中文字体支持（含中文标题/标签时设置）
+plt.rcParams['font.sans-serif'] = ['SimHei', 'Noto Sans CJK SC', 'Arial Unicode MS']
+plt.rcParams['axes.unicode_minus'] = False
 ```
 
 **R (ggplot2 主题)**

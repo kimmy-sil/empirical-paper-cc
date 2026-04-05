@@ -1,7 +1,4 @@
 description: 生成LaTeX三线表
-argument-hint: <回归结果对象或CSV路径>
+argument-hint: <回归结果或CSV路径>
 ---
-将 $ARGUMENTS 格式化为LaTeX三线表（booktabs + threeparttable）。
-自动添加：标准误括号、显著性星号、N和R²、固定效应Yes/No行、注释行。
-保存为 .tex 文件到 output/tables/。
-论文中用 \input{} 引用。
+格式化为booktabs三线表。自动：标准误括号、星号、N/R²、FE Yes/No行。输出.tex到output/tables/。

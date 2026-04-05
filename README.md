@@ -1,261 +1,213 @@
-# Empirical Paper Pipeline（实证论文生成流水线）
+# empirical-paper-cc
 
-AI 辅助的一站式实证论文生成工具。从研究 idea 到终稿 + Beamer 幻灯片，覆盖完整研究流程。
+一站式实证论文生成 Claude Code Skill
 
-> AI 负责把数据变成规范稿件，研究者负责把稿件变成好研究。
+> 扔数据 + 说想法 → 出论文。内置因果推断防护网。
 
-## Workflow
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                    INPUT（三种入口）                              │
-│  A) 上传数据文件 (.csv/.xlsx/.dta)                               │
-│  B) 给出研究主题 ("数字普惠金融对农村消费的影响")                    │
-│  C) 提供 Research Prompt（APE 风格，完整研究设计方案）              │
-└───────────┬─────────────────────────┬───────────────────────────┘
-            │                         │
-            ▼                         ▼
-┌──── STAGE 1 ────┐          ┌──── STAGE 2 ────┐
-│   数据审计       │          │  研究问题生成     │
-│  · 面板结构诊断   │          │  · 3-5 个候选问题  │
-│  · 变量分类      │          │  · 文献快扫       │
-│  · 质量检查      │    ┌─────│  · 四维评分       │
-│  · 自动清洗      │    │     └────────┬────────┘
-└────────┬────────┘    │              │
-         │             │     ◆ 人工决策门 1：选择研究问题
-         └─────────────┘              │
-                                      ▼
-                            ┌──── STAGE 3 ────┐
-                            │  识别策略设计     │
-                            │  · 方法自动路由：  │
-                            │    DID / IV / RDD │
-                            │    Panel FE / SC  │
-                            │    DML / 时间序列  │
-                            │  · 预分析计划     │
-                            └────────┬────────┘
-                                     │
-                            ◆ 人工决策门 2：确认识别策略
-                                     │
-                                     ▼
-                            ┌──── STAGE 4 ────┐
-                            │   计量分析       │
-                            │  · 描述性统计     │
-                            │  · 主回归        │
-                            │  · 平行趋势检验   │
-                            │  · 稳健性检验     │
-                            │  · 异质性分析     │
-                            │  · 三语言代码输出  │
-                            └────────┬────────┘
-                                     │
-                                     ▼
-                            ┌──── STAGE 5 ────┐
-                            │   论文撰写       │
-                            │  · IMRaD 结构    │
-                            │  · Markdown + LaTeX │
-                            └────────┬────────┘
-                                     │
-                                     ▼
-                            ┌──── STAGE 6 ────┐
-                            │  审稿模拟 & 修订  │
-                            │  · 5 维度打分     │
-                            │  · 最多 2 轮修订  │
-                            └────────┬────────┘
-                                     │
-                            ◆ 人工决策门 3：批准终稿
-                                     │
-                                     ▼
-                  ┌──── STAGE 7 ────┐   ┌──── STAGE 8 ────┐
-                  │    终稿输出      │   │  Beamer 幻灯片   │
-                  │  · 论文 (md+tex) │   │  · 15-20 页      │
-                  │  · 图表         │   │  · 含公式/三线表   │
-                  │  · 复制包       │   │  · 备用幻灯片     │
-                  └────────────────┘   └────────────────┘
-```
-
-## Two-Layer Architecture
-
-### Layer 1: Pipeline Orchestrator（全流程编排器）
-
-上面的 8 阶段流水线 + 3 个人工决策门。适合从零开始一篇完整论文。
-
-### Layer 2: 16 Independent Skills（独立模块）
-
-每个模块可单独调用，不必走完整 pipeline：
-
-| 类别 | Skills | 独立调用示例 |
-|------|--------|------------|
-| **计量方法** (8) | DID, IV, RDD, Panel FE, Synthetic Control, OLS, ML-Causal, Time Series | "帮我跑一个 DID" |
-| **数据处理** (3) | Data Cleaning, Data Fetcher, Stats | "拉一下 World Bank 的 GDP 数据" |
-| **输出写作** (5) | Figure, Table, Paper Writing, Literature Review, Beamer | "生成事件研究图" |
-
-## Features
-
-### 因果识别方法
-
-| 方法 | 覆盖内容 | Python | R | Stata |
-|------|---------|--------|---|-------|
-| DID | TWFE, Stacked DID, CS(2021), SA(2021), DDD, PSM-DID | linearmodels, pydid | fixest, did | reghdfe, csdid |
-| DID 诊断 | Bacon 分解, twowayfeweights, pretrends 功效分析, HonestDiD 敏感性 | — | bacondecomp, pretrends, HonestDiD | bacondecomp, twowayfeweights |
-| DID 拓展 | Synthetic DID, fect (矩阵补全反事实) | — | synthdid, fect | sdid |
-| IV / 2SLS | LATE/MTE 框架, 四大流派, Bartik shift-share, 法官设计, Conley-Hansen-Rossi | linearmodels | fixest, ivreg, bartik.weight | ivreghdfe, ssaggregate |
-| RDD | Sharp, Fuzzy, RDiT (时间断点), 地理 RDD, 多门槛 RDD | rdrobust | rdrobust, rddensity, rdmc | rdrobust |
-| Panel FE | Entity/Time/Two-way FE, 高维 FE, Hausman, Driscoll-Kraay SE | linearmodels | fixest, plm | reghdfe, xtreg |
-| Synthetic Control | Abadie SCM, 置换推断, gsynth | SparseSC | Synth, tidysynth, gsynth | synth |
-| DML | PLM vs IRM 选择指南, Neyman 正交性, 与 IV/DID/RDD 嵌套, 六条实践指南 | econml, doubleml | DoubleML | — |
-| Causal Forest | CATE 估计, 变量重要性 | econml | grf | — |
-| Time Series | ADF/PP/KPSS, 协整, VAR/VECM, Granger, IRF, ARDL, 结构突变 | statsmodels | vars, urca | var, vec |
-
-### 方法论深度（不只是代码模板）
-
-- **DID**：Goodman-Bacon 分解原理、负权重问题解释、Roth(2022) 功效分析、Rambachan-Roth(2023) 敏感性边界
-- **IV**：Imbens-Angrist(1994) LATE 精确定义、Heckman-Vytlacil(2005) MTE 统一框架、IV 四大流派分类与外生性来源比较、Bartik shift-share 的三场方法论争论
-- **RDD**：五种断点类型分类（分数/年龄/时间/地理/指标）、RDiT 时间自相关处理、地理 RDD 的 GIS 距离计算
-- **DML**："先识别后估计"的准确定位、PLM vs IRM 的选择判断、何时不该用 DML
-
-### 其他功能
-
-- Python / R / Stata 三语言代码模板，全部可复用
-- LaTeX 论文模板（AER/QJE 风格）+ Beamer 学术汇报模板
-- 自动从 FRED / World Bank / Census / OECD API 拉取公开数据
-- 中国数据库字段指引（CSMAR / CNRDS / Wind / 国统局）
-- APE 风格 Research Prompt 模板（含 3 个完整示例）
-- Balance Table 专项模块（标准化差异 + 匹配前后对比）
-- Dataset-aware 假设生成（先审计数据再提假设，避免幻觉）
-- 内置审稿模拟（5 维度打分，最多 2 轮修订）
+---
 
 ## Quick Start
-
-### 安装
 
 ```bash
 git clone https://github.com/kimmy-sil/empirical-paper-cc.git
 cd empirical-paper-cc
+claude
 ```
 
-### 在 Claude Code 中使用
+---
 
-```bash
-claude   # 启动 Claude Code，自动加载所有 skills
-```
+## Who Is This For
 
-### 全流程模式
+面向应用微观实证研究者（劳动 / 公共 / 发展 / 管理 / 城市 / 环境 / 健康经济学）。
 
-```
-> 我有一份省级面板数据（2010-2022），想研究数据要素市场化对经济增长的影响
-```
+方法论定位：Angrist-Imbens-Card 可信度革命范式（Design-based / Reduced-form）。
 
-Claude 从 Stage 1 开始，自动走完 8 阶段。在 3 个决策门会停下来等你确认。
+不覆盖：结构估计（BLP/DSGE）、空间计量（SAR/SDM）、一般均衡反事实模拟。
 
-### 单模块模式
+---
 
-```
-> 帮我跑一个 DID，处理变量是 policy，处理时间是 2018 年
-> 生成一个事件研究图
-> 帮我做个 Beamer 汇报
-> 拉一下 World Bank 的 GDP 数据
-> 帮我做一个 Balance Table
-> 用 Callaway-Sant'Anna 跑交错 DID
-```
+## Prerequisites
 
-### Research Prompt 模式
+- Claude Code 订阅（Claude Max 或 Pro）
+- Node.js（Claude Code 运行环境）
+- Python 3.8+（pandas, numpy, matplotlib, statsmodels, linearmodels, doubleml, econml）
+- R（可选，用于 fixest, did, rdrobust, DoubleML, grf, scpi 等）
 
-提供一份 APE 风格的 Research Prompt（参考 `empirical-pipeline/templates/research-prompt-template.md`），跳过 Stage 1-2，直接从 Stage 3 开始。
+---
 
-### 在 Cursor / Windsurf 中使用
-
-将 `.claude/CLAUDE.md` 内容合并到项目的 rules 文件中。
-
-## Project Structure
+## Workflow
 
 ```
-.claude/
-  CLAUDE.md                          # 路由规则 + skills 目录
-
-empirical-pipeline/                  # Layer 1: 全流程编排器
-  SKILL.md                           # 8 阶段 pipeline 指令
-  scripts/
-    did_analysis.py                  # Python DID 模板 (linearmodels)
-    did_analysis.R                   # R DID 模板 (fixest + did)
-    did_analysis.do                  # Stata DID 模板 (reghdfe + csdid)
-    fetch_data.py                    # 自动数据获取 (FRED/WB/Census/OECD)
-  templates/
-    paper-latex.tex                  # LaTeX 论文模板 (AER/QJE 风格)
-    beamer-slides.tex                # Beamer 幻灯片模板
-    research-prompt-template.md      # APE 风格 Research Prompt 模板 (含 3 个示例)
-    paper-structure.md               # 论文结构指南
-    pre-analysis-template.md         # 预分析计划模板
-    question-template.md             # 研究问题评分模板
-  references/
-    did-methodology.md               # DID 方法论 (含交错 DID)
-    panel-fe-methods.md              # 面板固定效应
-    other-methods.md                 # RDD, IV, PSM, Synthetic Control
-    data-audit-checklist.md          # 数据审计清单
-    data-sources.md                  # 公开数据源目录
-
-skills/                              # Layer 2: 16 个独立模块
-  did-analysis/SKILL.md              # 1286 行 — DID 全套 + Stacked/honestdid/pretrends/fect/sdid
-  iv-estimation/SKILL.md             # 918 行 — IV + LATE/MTE/四大流派/Bartik/Conley-Hansen-Rossi
-  rdd-analysis/SKILL.md              # 843 行 — RDD + RDiT/地理RDD/多门槛
-  panel-data/SKILL.md                # 面板 FE + 高维 FE + Hausman
-  synthetic-control/SKILL.md         # SCM + 置换推断 + gsynth
-  ols-regression/SKILL.md            # OLS + VIF + 异方差检验
-  ml-causal/SKILL.md                 # 1049 行 — DML(PLM/IRM) + Causal Forest + 六条实践指南
-  time-series/SKILL.md               # 单位根/协整/VAR/IRF/ARDL/结构突变
-  data-cleaning/SKILL.md             # 缺失值/异常值/面板平衡/变量构造
-  data-fetcher/SKILL.md              # FRED/World Bank/Census/OECD API
-  stats/SKILL.md                     # Table 1 / 相关系数 / 统计检验
-  figure/SKILL.md                    # 事件研究图/系数图/RDD图/SC图
-  table/SKILL.md                     # 三线表 / 回归表 / LaTeX 排版
-  paper-writing/SKILL.md             # IMRaD 结构 / 学术写作规范
-  literature-review/SKILL.md         # 文献搜索 / 综述写作 / BibTeX
-  beamer-ppt/SKILL.md                # Beamer 学术汇报幻灯片
+用户输入（数据 / 想法 / 两者）
+        │
+        ▼
+  S0: 研究设计协作
+  ├── 因果问题拆解
+  ├── DAG 绘制
+  ├── 识别策略匹配
+  ├── 文献定位
+  └── Research Design Memo
+        │
+   ◆ Gate 1（必停）
+   确认：数据 + 策略 + Estimand
+        │
+        ▼
+  S1: 数据清洗 + 描述统计
+  data-cleaning ▸ stats
+        │
+        ▼
+  S2: 描述性分析
+  figure ▸ trends ▸ distributions
+        │
+        ▼
+  S3: 基准回归
+  控制变量审核（DAG）▸ 主回归 ▸ 前置检验
+        │
+   ◆ Gate 2（条件触发）
+   结果异常时弹出
+        │
+        ▼
+  S4: 稳健性 + 机制 + 异质性
+  必做层 ▸ 推荐层 ▸ 情境层
+  内生性处理 ▸ 机制分析（DAG先行）▸ 异质性
+        │
+        ▼
+  S5: 论文 + 输出
+  paper-writing ▸ LaTeX ▸ 审稿模拟 ▸ Beamer（可选）
 ```
+
+**Gate 1**（必停）：确认数据概况 + 识别策略 + Estimand，等用户明确确认方可继续。
+
+**Gate 2**（条件触发）：系数符号异常 / 量级失控 / 预趋势显著失败时弹出，停止并报告。
+
+---
+
+## Slash Commands
+
+| 命令 | 功能 |
+|------|------|
+| `/new_project` | 启动 Stage 0 研究设计协作 |
+| `/run_did <data>` | DID 全流程（含 Bacon/CS-SA/HonestDiD）|
+| `/run_iv <data>` | IV 全流程（含弱工具/plausexog/AR推断）|
+| `/run_rdd <data>` | RDD 全流程（含密度检验/带宽敏感性）|
+| `/run_robustness <data>` | 分层稳健性检验（必做+推荐+情境）|
+| `/run_mechanism <data>` | 机制分析（DAG 先行）|
+| `/gen_table <results>` | 生成 LaTeX booktabs 三线表 |
+| `/gen_beamer <paper>` | 生成 15-20 页 Beamer 学术汇报 |
+
+---
+
+## Two-Layer Architecture
+
+```
+Layer 1: Pipeline（Stage 0-5）
+         ─ 端到端流程，Gate 1/2 把关
+         ─ 入口：empirical-pipeline/SKILL.md
+
+Layer 2: 17 Independent Skills
+         ─ 每个 Skill 可单独调用
+         ─ 目录：skills/
+```
+
+两层解耦：Pipeline 调用 Skill，Skill 也可单独使用（无需走完整 Pipeline）。
+
+---
+
+## Skills Catalog
+
+### 计量方法 Skills (9)
+
+| Skill | 功能 | 文件 |
+|-------|------|------|
+| did-analysis | DID / 交错DID / Bacon分解 / HonestDiD | SKILL + ADVANCED |
+| iv-estimation | IV / LATE / MTE / Bartik / plausexog | SKILL + ADVANCED |
+| rdd-analysis | RDD / RDiT / 地理RDD / RD-DD | SKILL + ADVANCED |
+| panel-data | Panel FE / RE / Hausman / Mundlak | SKILL + GMM-DYNAMIC |
+| synthetic-control | SCM / scpi / augsynth | SKILL |
+| ols-regression | OLS / Spec Curve / Oster系数稳定性 | SKILL |
+| ml-causal | DML / Causal Forest / DynamicDML | SKILL |
+| time-series | 单位根 / VAR / VECM / ARDL / LP-IRF | SKILL |
+| mechanism-analysis | 5种机制方法 / DAG / 坏控制警告 | SKILL |
+
+### 数据处理 Skills (3)
+
+| Skill | 功能 | 文件 |
+|-------|------|------|
+| data-cleaning | 缺失机制 / Winsorize / 面板平衡 | SKILL + ADVANCED |
+| data-fetcher | FRED / WB / OECD / akshare | SKILL + ADVANCED |
+| stats | Table1 / Balance Table / VIF / 缺失模式 | SKILL + ADVANCED |
+
+### 输出 Skills (5)
+
+| Skill | 功能 | 文件 |
+|-------|------|------|
+| figure | 事件研究图 / 系数图 / RDD图 / 密度图 | SKILL |
+| table | 三线表 / 回归表 / LaTeX booktabs | SKILL |
+| paper-writing | IMRaD / 写作规范 / Estimand声明段 | SKILL |
+| literature-review | 文献综述写作 / BibTeX / 贡献定位 | SKILL |
+| beamer-ppt | Beamer 学术汇报 / 15-20页模板 | SKILL |
+
+---
+
+## Key Design Principles
+
+**1. Estimand 声明贯穿全流程**
+所有 9 种方法 skill 均要求在输出中明确声明 Estimand（ATT/LATE/ATE/ATO），并给出形式化定义和识别假设。
+
+**2. 稳健性三层分层**
+- 必做层：绑定识别策略，不可省略（DID→Bacon+HonestDiD，IV→AR推断+plausexog，RDD→密度+带宽）
+- 推荐层：每项附经济学理由，非默认全做
+- 情境层：由数据特征自动触发（大量零值→ppmlhdfe，小样本→野bootstrap）
+
+**3. DAG 持久性**
+Stage 0 画一次 DAG，在 Stage 3 控制变量审核和 Stage 4 机制分析中复用。避免反复讨论同一变量是否应该控制。
+
+**4. Causal Forest ≠ 因果识别**
+Causal Forest 只能在主回归已建立因果效应后，用于探索异质性。不能作为初始因果识别工具使用。
+
+**5. 方法论边界透明**
+Reduced-form only。需要结构估计（BLP/DSGE/IO）或空间计量（SAR/SDM）时，系统明确告知超出范围，而非强行适配。
+
+**6. 禁止坏控制变量**
+系统在 Stage 3 前强制审核所有控制变量（后定/对撞/中介）。发现后定或对撞变量时，阻断回归并给出理由。
+
+---
+
+## Methods Coverage
+
+| 方法 | Python | R |
+|------|--------|---|
+| DID (TWFE / CS / SA / Stacked) | linearmodels | fixest, did |
+| HonestDiD | — | HonestDiD |
+| IV / 2SLS / LIML | linearmodels | fixest, ivreg |
+| plausexog | — | plausexog |
+| RDD Sharp / Fuzzy | rdd, rdrobust | rdrobust |
+| Panel FE / RE / HDFE | linearmodels | fixest |
+| System GMM | — | plm::pgmm |
+| SCM | scpi_pkg | tidysynth, scpi, augsynth |
+| DML (PLM / IRM) | doubleml, econml | DoubleML |
+| Causal Forest | econml | grf |
+| Time Series (VAR/VECM/ARDL) | statsmodels | vars, urca, ARDL |
+| Local Projections IRF | statsmodels | lpirfs |
+
+注：本 pipeline 不生成 Stata 代码。所有分析脚本输出为 Python 和 R，保存至 `output/replication/`。
+
+---
 
 ## Output Structure
 
-运行完整 pipeline 后生成的文件：
-
 ```
 output/
-├── data_audit_report.md             # 数据审计报告
-├── candidate_questions.md           # 研究问题候选（含评分）
-├── pre_analysis_plan.md             # 预分析计划
-├── analysis_log.md                  # 分析日志
-├── tables/
-│   ├── table1_descriptive.md        # 描述性统计（Balance Table）
-│   ├── table2_main_results.md       # 主回归结果
-│   ├── table3_robustness.md         # 稳健性检验
-│   └── table4_heterogeneity.md      # 异质性分析
-├── figures/
-│   ├── fig1_trends.png              # 平行趋势图
-│   ├── fig2_event_study.png         # 事件研究图
-│   └── fig3_coefficients.png        # 系数图
-├── paper_draft.md                   # 论文初稿 (Markdown)
-├── paper_final.tex                  # 论文终稿 (LaTeX)
-├── beamer_slides.tex                # Beamer 幻灯片
-├── review_round1.md                 # 审稿意见
-├── revision_response.md             # 修改回应
-└── replication/
-    ├── analysis.py                  # Python 复制代码
-    ├── analysis.R                   # R 复制代码
-    ├── analysis.do                  # Stata 复制代码
-    └── README.md                    # 运行说明
+├── tables/          # .tex 三线表（\input{} 引用）
+├── figures/         # .pdf / .png 图形（DPI≥300）
+└── replication/     # Python + R 可复现脚本
 ```
 
-## Design Principles
+表格规范：所有数字通过代码生成后 `\input{}` 引用，禁止手动抄数。
 
-1. **Dataset-aware**：先审计数据再生成假设，不会提出数据不支持的研究问题
-2. **Human-in-the-loop**：3 个决策门确保研究者对关键判断拥有最终决定权
-3. **方法论理解优先于代码执行**：每个 skill 不只是代码模板，还包含方法论原理、适用条件、常见错误
-4. **DML 是工具不是策略**：明确区分识别策略（DID/IV/RDD）和估计方法（DML），防止误用
-5. **交错 DID 不盲目用 TWFE**：自动路由到 CS(2021)/SA(2021)，附 Bacon 分解诊断
+图形规范：DPI≥300，字号≥12pt，黑白友好（线型区分色彩区分并存）。
 
-## Inspired By
-
-- [APE](https://github.com/SocialCatalystLab/ape-papers) — Automated Policy Evaluation (Social Catalyst Lab)
-- [HLER](https://github.com/maxwell2732/hler-working-papers) — Human-LLM Empirical Research
-- [academic-research-skills](https://github.com/Imbad0202/academic-research-skills) — Academic Research Skills for Claude Code
-- [stata-skill](https://github.com/dylantmoore/stata-skill) — Stata expertise for AI agents
+---
 
 ## License
 

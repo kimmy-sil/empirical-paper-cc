@@ -2,7 +2,7 @@
 
 ## 概述
 
-本 skill 提供实证论文中标准学术表格的排版规范与代码模板，涵盖三线表格式、回归结果表、描述性统计表、异质性分析表和稳健性检验表，支持 LaTeX / Markdown / Python / R / Stata 多种输出方式。
+本 skill 提供实证论文中标准学术表格的排版规范与代码模板，涵盖三线表格式、回归结果表、描述性统计表、异质性分析表和稳健性检验表，支持 LaTeX / Markdown / Python / R 多种输出方式。
 
 **适用场景**：
 - 回归结果主表（多列逐步加入控制变量/固定效应）
@@ -19,7 +19,7 @@
 |------|--------|
 | Python | `pandas`, `statsmodels`, `linearmodels`, `tabulate` |
 | R | `modelsummary`, `stargazer`, `fixest`（`etable`） |
-| Stata | `estout`/`esttab`（ssc install）, `outreg2`（ssc install） |
+| Stata | 不使用 Stata |
 | LaTeX | `booktabs`, `threeparttable`, `multirow`, `adjustbox` 宏包 |
 
 ---
@@ -83,25 +83,29 @@ import numpy as np
 import statsmodels.formula.api as smf
 from linearmodels.panel import PanelOLS
 
-def format_coef(coef, se, stars=True):
-    """格式化系数（保留3位小数）+ 括号内标准误"""
+def get_params_safely(res):
+    """statsmodels 和 linearmodels 双适配参数提取"""
+    if hasattr(res, 'params') and isinstance(res.params, pd.Series):
+        return res.params, res.bse, res.pvalues
+    return pd.Series(res.params), pd.Series(res.std_errors), pd.Series(res.pvalues)
+
+def format_coef(coef, se, pval, stars=True):
+    """格式化系数（保留3位小数）+ 括号内标准误，显著性基于 p 值"""
     if pd.isna(coef):
         return "", ""
     sig = ""
-    if stars:
-        t = abs(coef / se) if se > 0 else 0
-        # 近似 p 值阈值（双侧，大样本）
-        if t > 2.576: sig = "***"
-        elif t > 1.960: sig = "**"
-        elif t > 1.645: sig = "*"
+    if stars and not pd.isna(pval):
+        if pval < 0.01: sig = "***"
+        elif pval < 0.05: sig = "**"
+        elif pval < 0.10: sig = "*"
     coef_str = f"{coef:.3f}{sig}"
     se_str   = f"({se:.3f})"
     return coef_str, se_str
 
 def build_regression_table(models, var_order=None, fe_rows=None, extra_stats=None):
     """
-    models: list of (label, result_object, se_type)
-            result_object 需有 .params, .bse, .nobs, .rsquared
+    models: list of (label, result_object, _)
+            result_object 需有 .params/.bse/.pvalues（statsmodels）或 .params/.std_errors/.pvalues（linearmodels）
     var_order: 变量显示顺序（未列出的变量不显示）
     fe_rows: list of (row_label, [bool, bool, ...]) 固定效应行
     extra_stats: list of (label, [val, val, ...]) 附加统计行
@@ -119,10 +123,12 @@ def build_regression_table(models, var_order=None, fe_rows=None, extra_stats=Non
     for v in var_order:
         coef_row = [v]
         se_row   = [""]
-        for _, res, se_attr in models:
-            coef = res.params.get(v, np.nan)
-            se   = getattr(res, se_attr, res.bse).get(v, np.nan) if hasattr(res, se_attr) else res.bse.get(v, np.nan)
-            c, s = format_coef(coef, se)
+        for _, res, _ in models:
+            params, bse, pvals = get_params_safely(res)
+            coef = params.get(v, np.nan)
+            se   = bse.get(v, np.nan)
+            pval = pvals.get(v, np.nan)
+            c, s = format_coef(coef, se, pval)
             coef_row.append(c)
             se_row.append(s)
         rows.append(coef_row)
@@ -164,9 +170,9 @@ m3 = smf.ols("log_revenue ~ treated + log_assets + leverage + age", data=df).fit
 
 tbl = build_regression_table(
     models=[
-        ("OLS (1)", m1, "bse"),
-        ("OLS (2)", m2, "bse"),
-        ("OLS (3)", m3, "bse"),
+        ("OLS (1)", m1, None),
+        ("OLS (2)", m2, None),
+        ("OLS (3)", m3, None),
     ],
     var_order=["treated", "log_assets", "leverage", "age", "Intercept"],
     fe_rows=[
@@ -196,7 +202,11 @@ modelsummary(
     "log_assets" = "Log(Assets)",
     "leverage"   = "Leverage"
   ),
-  gof_map = c("nobs", "r.squared", "adj.r.squared"),
+  gof_map = data.frame(
+    raw  = c("nobs", "r.squared", "adj.r.squared"),
+    clean = c("N", "R2", "Adj. R2"),
+    fmt  = c(0, 3, 3)
+  ),
   output = "output/tables/main_results.tex",
   booktabs = TRUE,
   title = "Main Results",
@@ -205,6 +215,11 @@ modelsummary(
 
 # 也可输出为 Word
 modelsummary(list(m1, m2, m3), output = "output/tables/main_results.docx")
+
+# 注：Python 用户可选用 stargazer 包（pip install stargazer），支持 HTML/LaTeX 输出
+# from stargazer.stargazer import Stargazer
+# star = Stargazer([m1, m2, m3])
+# print(star.render_latex())
 ```
 
 **R (fixest::etable)**
@@ -220,31 +235,6 @@ etable(
   tex = TRUE,           # 输出 LaTeX
   file = "output/tables/main_results_etable.tex"
 )
-```
-
-**Stata (esttab)**
-```stata
-* 估计并存储结果
-eststo m1: reg log_revenue treated, robust
-eststo m2: reghdfe log_revenue treated log_assets leverage, absorb(firm_id) cluster(firm_id)
-eststo m3: reghdfe log_revenue treated log_assets leverage, absorb(firm_id year) cluster(firm_id)
-
-* 输出三线表
-esttab m1 m2 m3,                      ///
-    b(3) se(3) star(* 0.1 ** 0.05 *** 0.01) ///
-    booktabs                            ///
-    title("Main Results")               ///
-    mtitles("OLS" "Firm FE" "TWFE")    ///
-    keep(treated log_assets leverage)   ///
-    order(treated log_assets leverage)  ///
-    scalars("N Observations" "r2 R-squared") ///
-    addnotes("Standard errors clustered at firm level." ///
-             "* p<0.1, ** p<0.05, *** p<0.01")  ///
-    using "output/tables/main_results.tex", replace
-
-* outreg2 替代方案
-outreg2 [m1 m2 m3] using "output/tables/main_outreg.doc", ///
-    word bdec(3) sdec(3) addstat("Firm FE", "No", "Year FE", "No")
 ```
 
 ---
@@ -428,12 +418,12 @@ IV (instrument Z)      & 0.198***    & (0.073) \\
 
 ## 常见错误提醒
 
-1. **括号内放 t 值而非 SE**：经管类期刊标准是括号内放标准误（SE），而非 t 统计量。esttab 默认是 SE，但需确认。
+1. **括号内放 t 值而非 SE**：经管类期刊标准是括号内放标准误（SE），而非 t 统计量。生成表格时需确认输出格式。
 2. **R² 与 Adjusted R²** 混淆：固定效应模型通常报告 Within R²，需在注释中说明。
 3. **星号标准不统一**：有的论文用 `* p<0.05 ** p<0.01`，应在投稿前确认目标期刊惯例。通常 AER/QJE 用 `* 0.10 ** 0.05 *** 0.01`。
 4. **`threeparttable` 与 `table` 宽度冲突**：`adjustbox{max width=\textwidth}` 可解决表格超出版面问题。
 5. **modelsummary 输出变量顺序错误**：用 `coef_map` 参数指定显示顺序和重命名，未列入的变量自动隐藏。
-6. **Stata esttab 标准误类型**：需在 `esttab` 命令中用 `vce(cluster firm_id)` 或 `se` 选项明确指定，否则默认 OLS SE。
+6. **标准误类型**：在 modelsummary 中用 `vcov` 参数指定（如 `vcov = ~firm_id` 表示企业层面聚类），未指定时默认 OLS SE。
 
 ---
 
