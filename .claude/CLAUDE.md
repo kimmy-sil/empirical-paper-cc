@@ -46,23 +46,60 @@ Stage 0 行为：
 
 ## 5. Skill 路由表
 
-数据结构自动路由：
-- 有id+time → panel-data（默认）
-- 纯横截面 → ols-regression
-- 单截面多时期 → time-series
+> **优先级：5a → 5b → 5c。必须按顺序执行，不可跳步。**
 
-识别策略路由：
-- 政策交错实施 → did-analysis
-- 数值门槛 → rdd-analysis
-- 合理工具变量 → iv-estimation
-- 含滞后因变量+T小 → panel-data GMM
-- 处理单位≤5 → synthetic-control
-- 高维协变量 → ml-causal
-- 纯横截面无因果设计 → ols-regression
-- 主回归后机制分析 → mechanism-analysis
-- ⚠️ 以上都不适用 → 告知用户
+### 5a. 数据层次判断（所有路由的前提）
 
-辅助 skill：data-cleaning / data-fetcher / stats / figure / table / paper-writing / literature-review / beamer-ppt
+拿到数据后，先回答三个问题，再进入任何 skill：
+
+**Q1：数据里有没有唯一个体 ID，且同一 ID 出现在多个时期？**
+- 有 → 真正面板数据，继续 Q2
+- 没有 / 每年重新抽样不同个体 → ⚠️ 混合截面，按截面处理，**禁止使用固定效应模型**
+
+**Q2：N 和 T 的大小关系？**
+- T > 20 且 T 接近或超过 N → 长面板特征，预加载 `panel-data/LONG-PANEL.md`，进入回归前先做单位根检验
+- 个体观测期数不相等（T_i 不同）→ 预加载 `panel-data/UNBALANCED.md`，先诊断缺失机制（MCAR/MAR/MNAR）
+
+**Q3：因变量 Y 是什么类型？**
+- 连续变量 → 走主流程
+- 二元 / 计数 / 有序变量 → 预加载 `panel-data/DISCRETE.md`
+
+### 5b. 数据结构 → Skill 路由
+
+| 数据结构 | 路由 |
+|---------|------|
+| 真正面板（同一批个体 × 多期） | `panel-data` |
+| 纯截面（每个个体只有一期） | `ols-regression` |
+| 单截面多时期（N=1，T>1） | `time-series` |
+| 混合截面（不同批，有 year 列但非追踪） | `ols-regression`，⚠️ 禁止 FE |
+
+**新手常见陷阱（进入 skill 前必读）：**
+- 🚨 混合截面 ≠ 面板：不同年份重新抽样的数据，格式上有 year 列，也不是面板
+- 🚨 长面板 / 时序不检验平稳性 = 伪回归风险（R² 虚高，结果无效）
+- 🚨 核心变量 X 几乎不随时间变化 → FE 会吸收 X，系数不显著 ≠ 无效，先做 within 方差分解
+- 🚨 工具变量外生性不能靠统计检验，只能靠理论论证
+
+### 5c. 识别策略 → Skill 路由
+
+- 政策交错实施 → `did-analysis`
+- 数值门槛 → `rdd-analysis`
+- 合理工具变量 → `iv-estimation`
+- 含滞后因变量 + T 小 → `panel-data` GMM 子文件
+- 处理单位 ≤ 5 → `synthetic-control`
+- 高维协变量 → `ml-causal`
+- 纯横截面无因果设计 → `ols-regression`
+- 主回归后机制分析 → `mechanism-analysis`
+- ⚠️ 以上都不适用 → 告知用户，不强行套用
+
+### 5d. Sub-agent 路由
+
+| 触发条件 | 调用 agent |
+|---------|------------|
+| Stage 1 开始前 / `/audit` | `data-auditor`（只读审计，输出隔离） |
+| 代码报错 / 结果异常 / 跨语言验证 UNRESOLVED | `debug-agent`（根因 → 最小修复 → 验证） |
+| 投稿前 `/peer [journal]` | `methods-referee`（审稿模拟 + Python/R 双验证） |
+
+辅助 skill：`data-cleaning` / `data-fetcher` / `stats` / `figure` / `table` / `paper-writing` / `literature-review` / `beamer-ppt`
 
 ## 6. 论文输出规范
 双格式：Markdown + LaTeX
