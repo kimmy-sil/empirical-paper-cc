@@ -1,3 +1,12 @@
+---
+name: data-fetcher
+description: "数据获取与下载，含 FRED/World Bank/OECD/akshare/CSMAR/CNRDS/Wind 等数据源对接"
+workflow_stage: data
+disable-model-invocation: true
+tags: [Python, R, API, FRED, World-Bank, OECD, akshare, CSMAR, Wind]
+trigger: "Pipeline Stage 1a — 手动调用；/discover data 可触发"
+---
+
 # 数据获取助手
 
 ## 概述
@@ -5,7 +14,17 @@
 主流经济/财经数据库API接入、代码模板、手动下载指引。  
 **语言**：Python + R（NO Stata）
 
-**高级内容**：R端（fredr/WDI）完整代码、Census详细用法、CNRDS/Wind说明、缓存策略、频率对齐 → 见 ADVANCED.md
+**职责边界**：本 skill 只管"把数据搞到手 + 存好 + 记录来源"。  
+字段清洗 / EDA / 缺失诊断 → `data-cleaning` skill  
+数据源评估（5-point assessment / Feasibility Grade）→ Pipeline Stage 1b EDA 节
+
+**高级内容** → 见 ADVANCED.md：
+- R端（fredr / WDI）完整代码
+- Census API 详细用法
+- Wind 详细说明
+- 频率对齐（月→季→年）完整代码
+- 跨源数据合并模板
+- 增量更新策略
 
 ---
 
@@ -46,13 +65,13 @@ CENSUS_KEY  = get_api_key("CENSUS_API_KEY", "Census", "https://api.census.gov/da
 |------|------|------|
 | **A（有API Key）** | Key已配置 + 网络可用 | 完整可运行脚本 |
 | **B（无Key）** | 网络可用但无Key | 申请链接 + Key占位符模板 |
-| **C（无网络/手动）** | 离线/机构数据 | 手动下载指引 + 清洗代码 |
+| **C（无网络/手动）** | 离线/机构数据 | 手动下载指引 + 读取代码 |
 
 ---
 
 ## 国际数据源（公开免费）
 
-### FRED API（推荐，代码质量高）
+### FRED API（推荐）
 
 ```python
 # pip install fredapi
@@ -61,16 +80,28 @@ import pandas as pd, os
 
 fred = Fred(api_key=os.environ.get("FRED_API_KEY"))
 
+# ── 常用序列速查 ──
 FRED_SERIES = {
-    "fed_funds_rate":  "FEDFUNDS",    # 联邦基金利率（月）
-    "us_gdp":          "GDP",         # 美国GDP（季度）
-    "us_cpi":          "CPIAUCSL",    # CPI（月）
-    "us_unemployment": "UNRATE",      # 失业率（月）
-    "us_10y_treasury": "DGS10",       # 10年期国债收益率（日）
-    "vix":             "VIXCLS",      # VIX（日）
-    "usd_cny":         "DEXCHUS",     # 美元/人民币（日）
-    "wti_oil":         "DCOILWTICO",  # WTI油价（日）
-    "us_m2":           "M2SL",        # M2（月）
+    # GDP & Output
+    "FEDFUNDS":   "联邦基金利率（月）",
+    "GDP":        "美国名义GDP（季度）",
+    "GDPC1":      "美国实际GDP（季度）",
+    # Prices
+    "CPIAUCSL":   "CPI（月）",
+    "PCEPI":      "PCE价格指数（月）",
+    "CPILFESL":   "核心CPI（月）",
+    # Labor
+    "UNRATE":     "失业率（月）",
+    "PAYEMS":     "非农就业（月）",
+    "CIVPART":    "劳动参与率（月）",
+    # Rates & Financial
+    "DGS10":      "10年期国债收益率（日）",
+    "T10Y2Y":     "10Y-2Y期限利差（日）",
+    "VIXCLS":     "VIX（日）",
+    # Money & FX
+    "M2SL":       "M2（月）",
+    "DEXCHUS":    "美元/人民币（日）",
+    "DCOILWTICO": "WTI油价（日）",
 }
 
 def fetch_fred_series(series_dict: dict, start: str="2000-01-01",
@@ -90,7 +121,10 @@ def fetch_fred_series(series_dict: dict, start: str="2000-01-01",
     df.to_parquet("data/raw/fred_macro.parquet")
     return df
 
-df_fred = fetch_fred_series(FRED_SERIES, start="2000-01-01")
+df_fred = fetch_fred_series(
+    {v: k for k, v in FRED_SERIES.items()},  # 反转为 name→code
+    start="2000-01-01"
+)
 
 # 搜索序列
 results = fred.search("China GDP")
@@ -122,7 +156,6 @@ def fetch_wb_panel(indicators: dict, countries: list=None,
                    start_year: int=2000, end_year: int=2023) -> pd.DataFrame:
     """
     下载世行面板数据，返回长格式DataFrame
-    FIX: labels=True是wb.data.DataFrame的参数，不是wb.search的参数
     FIX: numericTimeKeys=True → 时间列为整数年份（非"YR2020"格式字符串）
     """
     if countries is None:
@@ -134,8 +167,8 @@ def fetch_wb_panel(indicators: dict, countries: list=None,
                 code,
                 economy=countries,
                 time=range(start_year, end_year+1),
-                labels=True,           # 添加economy名称列
-                numericTimeKeys=True   # 时间列为整数，非"YR2020"
+                labels=True,
+                numericTimeKeys=True
             )
             df_long = df.stack().reset_index()
             df_long.columns = ["iso3c","country","year",name]
@@ -157,9 +190,9 @@ wb.search("foreign direct investment")
 
 ---
 
-### OECD（重写！旧API已废弃）
+### OECD（新端点，旧API已废弃）
 
-**重要**：`stats.oecd.org/SDMX-JSON/`旧端点已废弃，使用新端点`sdmx.oecd.org`。
+**重要**：`stats.oecd.org/SDMX-JSON/` 已废弃 → 使用 `sdmx.oecd.org`。
 
 ```python
 import requests, pandas as pd
@@ -170,15 +203,8 @@ OECD_NEW_BASE = "https://sdmx.oecd.org/public/rest/data"
 def fetch_oecd_new(dataset_id: str, filter_expr: str="all",
                    start_period: str="2000", end_period: str="2023") -> pd.DataFrame:
     """
-    使用新OECD SDMX REST API（2024年起）
-    旧端点 stats.oecd.org/SDMX-JSON 已废弃！
-
-    dataset_id常用值:
-    - "GDP"              → 国民账户主要指标
-    - "ULC_EEQ"          → 单位劳动力成本
-    - "HEALTH_STAT"      → 卫生统计
-    - "REVENUE_STATISTICS" → 税收统计
-    - "TIVA"             → 增加值贸易
+    新OECD SDMX REST API（2024年起）
+    dataset_id: "GDP" / "ULC_EEQ" / "REVENUE_STATISTICS" / "TIVA"
     """
     url = f"{OECD_NEW_BASE}/{dataset_id}/{filter_expr}"
     params = {
@@ -198,7 +224,6 @@ def fetch_oecd_new(dataset_id: str, filter_expr: str="all",
         print("  备选：访问 https://data.oecd.org 手动下载CSV")
         return pd.DataFrame()
 
-# 示例
 df_oecd = fetch_oecd_new(
     dataset_id   = "GDP",
     filter_expr  = "USA+CHN+DEU+JPN+GBR",
@@ -216,7 +241,7 @@ df_oecd = fetch_oecd_new(
 # pip install akshare
 import akshare as ak
 
-# 宏观数据
+# ── 宏观数据 ──
 df_cpi   = ak.macro_china_cpi_monthly()       # CPI月度
 df_ppi   = ak.macro_china_ppi_monthly()        # PPI月度
 df_pmi   = ak.macro_china_pmi()                # PMI
@@ -240,14 +265,8 @@ df_shibor = ak.rate_interbank(
     market="上海银行间同业拆放利率", symbol="Shibor人民币"
 )
 
-# 清洗模板
-def clean_akshare(df: pd.DataFrame, date_col: str, value_col: str) -> pd.DataFrame:
-    df = df[[date_col, value_col]].copy()
-    df[date_col]  = pd.to_datetime(df[date_col])
-    df[value_col] = pd.to_numeric(df[value_col], errors="coerce")
-    return df.dropna().sort_values(date_col).reset_index(drop=True)
-
-df_cpi_clean = clean_akshare(df_cpi, date_col="月份", value_col="今值")
+# ⚠️ 字段清洗 → 见 data-cleaning skill
+# akshare 列名为中文，需统一重命名 + 类型转换
 ```
 
 ---
@@ -255,8 +274,7 @@ df_cpi_clean = clean_akshare(df_cpi, date_col="月份", value_col="今值")
 ### NBS API（备选，不稳定）
 
 ```python
-# ⚠️ 警告: easyquery.htm是非官方接口，随时可能失效
-# 频繁请求可能被封IP，优先使用akshare
+# ⚠️ easyquery.htm是非官方接口，随时可能失效；优先使用akshare
 import requests, time
 
 NBS_BASE = "https://data.stats.gov.cn/easyquery.htm"
@@ -287,8 +305,6 @@ def fetch_nbs_data(dataset_code: str, freq: str="M",
 
 需高校图书馆或购买订阅。
 
-**主要数据表**：
-
 | 数据表 | 合并键 | 核心字段 |
 |--------|--------|---------|
 | 股票行情 TRD_Mnth | `stkcd` + `trdmnt` | `mretwd`月收益率 |
@@ -296,36 +312,56 @@ def fetch_nbs_data(dataset_code: str, freq: str="M",
 | 公司信息 TRD_Co | `stkcd` | `indcd`行业代码 |
 | 高管信息 TMT | `stkcd` + `year` | `ceo_age`, `board_size` |
 
-**下载 + 读取（场景C）**：
 ```python
-# 登录 https://cn.gtadata.com → 导出CSV
+# 场景C：登录 https://cn.gtadata.com → 导出CSV
 df_csmar = pd.read_csv(
     "data/raw/csmar_financial.csv",
     encoding="gbk",      # Windows下CSMAR默认GBK
     low_memory=False
 )
-df_csmar["stkcd"] = df_csmar["stkcd"].astype(str).str.zfill(6)  # 6位补零
+df_csmar["stkcd"] = df_csmar["stkcd"].astype(str).str.zfill(6)
 df_csmar["year"]  = pd.to_datetime(df_csmar["accper"]).dt.year
 ```
 
 ---
 
-### CNRDS（机构账号）
+### CNRDS（中国研究数据服务平台，机构账号）
 
-主要数据集：年报文本、新闻舆情情绪得分、专利数据、ESG评级、高管背景。
+主要数据集：年报文本、新闻舆情情绪得分、专利数据、ESG评级、高管背景。  
+**无标准公开API**，主要通过网页下载 → `pd.read_excel()` / `pd.read_csv()`。
 
 ```python
-# ⚠️ 以下为示例/伪代码，实际接口以CNRDS官方文档为准
-# CNRDS无标准公开API，实际主要通过网页下载
-# https://www.cnrds.com
+# https://www.cnrds.com → 网页下载
+df_cnrds = pd.read_excel("data/raw/cnrds_esg.xlsx")
+```
 
-def query_cnrds_example(dataset: str, token: str) -> None:
-    """CNRDS API示例（伪代码，非官方确认接口）"""
-    import requests
-    headers = {"Authorization": f"Bearer {token}"}
-    # 实际端点和参数格式以官方文档为准
-    print(f"请访问 https://www.cnrds.com 获取官方API文档")
-    print(f"推荐方式：网页下载 → pd.read_excel() 或 pd.read_csv()")
+---
+
+### 中国微观调查数据库（场景C：手动下载）
+
+| 数据库 | 全称 | 获取方式 | 核心覆盖 |
+|--------|------|---------|---------|
+| **CFPS** | 中国家庭追踪调查 | 北大开放研究数据平台注册申请 | 家庭经济行为、教育、健康 |
+| **CGSS** | 中国综合社会调查 | 中国国家调查数据库(CNSDA)申请 | 社会态度、阶层流动、公共政策 |
+| **CHARLS** | 中国健康与养老追踪 | charls.pku.edu.cn 注册下载 | 45岁以上人群健康/养老/经济 |
+| **CHIP** | 中国家庭收入调查 | ciid.bnu.edu.cn 申请 | 收入分配、贫困、不平等 |
+| **CHFS** | 中国家庭金融调查 | chfs.swufe.edu.cn 申请 | 家庭资产、负债、金融行为 |
+
+```python
+# 通用读取模板（大多提供 Stata .dta 或 CSV 格式）
+import pandas as pd
+
+# .dta 格式（CFPS/CHARLS 常见）
+df = pd.read_stata("data/raw/cfps2020.dta", convert_categoricals=False)
+
+# .csv 格式
+df = pd.read_csv("data/raw/cgss2021.csv", encoding="utf-8")
+
+# ⚠️ 注意事项：
+# 1. 多数需要签署数据使用协议
+# 2. 变量名通常为编码（如 cfps2020_qa1），需对照 codebook
+# 3. 多波次面板需按 pid/fid 纵向合并
+# 4. 清洗步骤 → data-cleaning skill
 ```
 
 ---
@@ -360,7 +396,6 @@ def load_cached(cache_id: str, max_age_days: int=7) -> pd.DataFrame | None:
     return None
 
 def save_cache(df: pd.DataFrame, cache_id: str) -> None:
-    """保存缓存（parquet优先，失败时fallback csv）"""
     try:
         df.to_parquet(f"{CACHE_DIR}/{cache_id}.parquet", index=False)
     except Exception:
@@ -380,29 +415,31 @@ def fetch_with_cache(fetch_fn, params: dict, max_age_days: int=7) -> pd.DataFram
 
 ---
 
-## 检验清单 + 常见错误
-
-### 检验清单
+## 检验清单
 
 - [ ] **环境检测**：已运行Step 0（网络 + API Key）
 - [ ] **API Key**：通过环境变量注入，未硬编码
 - [ ] **时间范围**：下载覆盖研究期间（含足够前期观测）
-- [ ] **频率对齐**：多源合并前已统一频率（见ADVANCED.md）
+- [ ] **频率一致**：多源合并前已统一频率（见ADVANCED.md）
 - [ ] **单位统一**：是否需要CPI deflator平减 / PPP调整
 - [ ] **OECD端点**：使用新端点`sdmx.oecd.org`，非废弃的`stats.oecd.org`
-- [ ] **wbgapi labels**：`labels=True`在`wb.data.DataFrame`中，非`wb.search`
-- [ ] **akshare优先**：中国数据用akshare，NBS API仅作备选
+- [ ] **wbgapi参数**：`labels=True`在`wb.data.DataFrame`中，非`wb.search`
+- [ ] **akshare优先**：中国宏观数据用akshare，NBS API仅作备选
 - [ ] **缓存**：数据已缓存到`data/cache/*.parquet`
+- [ ] **schema记录**：`data/raw/`下每个文件附 column names + dtypes 记录
+- [ ] **data_provenance.md**：已填写数据来源记录（见输出规范）
 
-### 常见错误
+## 常见错误
 
-1. **OECD旧API**：`stats.oecd.org/SDMX-JSON/`已废弃，返回404/503。用新端点`sdmx.oecd.org`。
+1. **OECD旧API**：`stats.oecd.org/SDMX-JSON/`已废弃，返回404/503。用`sdmx.oecd.org`。
 2. **wbgapi labels参数**：`wb.data.DataFrame(..., labels=True)`有效；`wb.search(..., labels=True)`无此参数。
-3. **NBS频繁请求被封**：`easyquery.htm`是非官方接口，优先akshare。
-4. **频率混用**：GDP季度、CPI月度，直接merge产生大量NaN。先对齐频率再合并（见ADVANCED.md）。
-5. **CSMAR编码**：Windows默认GBK，服务器上读取需`encoding="gbk"`。
-6. **Wind云端不可用**：WindPy需本地终端，无法在服务器/云端使用。
-7. **wbgapi年份格式**：不加`numericTimeKeys=True`时年份列为`"YR2020"`字符串，需`.str.replace("YR","")`。
+3. **wbgapi年份格式**：不加`numericTimeKeys=True`时年份列为`"YR2020"`字符串。
+4. **NBS频繁请求被封**：`easyquery.htm`是非官方接口，优先akshare。
+5. **频率混用**：GDP季度、CPI月度，直接merge产生大量NaN。先对齐频率再合并（见ADVANCED.md）。
+6. **CSMAR编码**：Windows默认GBK，服务器上读取需`encoding="gbk"`。
+7. **Wind云端不可用**：WindPy需本地终端，无法在服务器/云端使用。
+
+---
 
 ## 输出规范
 
@@ -411,5 +448,20 @@ def fetch_with_cache(fetch_fn, params: dict, max_age_days: int=7) -> pd.DataFram
 | 原始下载数据 | `data/raw/{source}_{dataset}_{YYYYMMDD}.parquet` |
 | 缓存文件 | `data/cache/*.parquet`（加入.gitignore） |
 | 合并后面板 | `data/processed/merged_panel.parquet` |
+| **数据来源记录** | `data/raw/data_provenance.md` |
+
+### data_provenance.md 模板
+
+```markdown
+# Data Provenance
+
+| 变量 | 数据源 | 原始文件 | 时间范围 | 频率 | Feasibility | 已知问题 |
+|------|--------|---------|---------|------|-------------|---------|
+| cpi  | akshare | fred_macro.parquet | 2000-2024 | 月 | A | 基期变更(2020=100) |
+| gdp_pc | World Bank | worldbank_panel.parquet | 2000-2023 | 年 | A | 2023部分国家缺失 |
+| mretwd | CSMAR | csmar_financial.csv | 2005-2023 | 月 | B（需机构账号） | ST股需剔除 |
+
+Feasibility: A=公开下载 B=需申请/中等成本 C=受限(FSRDC/数据协议) D=极难(专有/需合作)
+```
 
 **论文数据节说明**：变量名、数据库名称、时间范围、频率、处理方式（平减/频率对齐方法）

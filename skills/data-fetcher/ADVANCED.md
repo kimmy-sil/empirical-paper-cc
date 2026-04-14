@@ -2,8 +2,8 @@
 
 本文件按需加载（ADVANCED.md）。包含：
 - R端（fredr / WDI）完整代码
-- Census API详细用法
-- Wind详细说明
+- Census API 详细用法
+- Wind 详细说明
 - 频率对齐（月→季→年）完整代码
 - 跨源数据合并模板
 - 增量更新策略
@@ -111,8 +111,8 @@ try:
 
     # 股票数据（wsd = Wind Sequence Data）
     data = w.wsd(
-        "600000.SH,600036.SH",         # 股票代码（逗号分隔）
-        "open,high,low,close,volume",  # 字段
+        "600000.SH,600036.SH",
+        "open,high,low,close,volume",
         "2020-01-01", "2023-12-31",
         "PriceAdj=B"                   # 前复权
     )
@@ -127,7 +127,7 @@ try:
     # 横截面数据（wss = Wind Snapshot Data）
     snapshot = w.wss(
         "600000.SH,600036.SH",
-        "pe_ttm,pb_lf,ps_ttm",         # PE/PB/PS
+        "pe_ttm,pb_lf,ps_ttm",
         "tradeDate=20231231"
     )
 
@@ -151,7 +151,7 @@ def align_frequency(df: pd.DataFrame, date_col: str, value_cols: list,
     """
     频率对齐（降采样）
     target_freq: 'QE'=季度末, 'YE'=年末
-    agg_method: 'mean'（流量变量）, 'last'（存量/期末值）, 'sum'
+    agg_method: 'mean'（价格/利率）, 'last'（存量/期末值）, 'sum'（流量）
 
     判断原则：
     - 流量变量（贸易差额/新增贷款）→ sum
@@ -186,6 +186,8 @@ def merge_multi_source(sources: dict, merge_on: list=["year"],
     """
     合并多个数据源（年度/季度面板）
     sources: {"fred":df_fred, "wb":df_wb, "akshare":df_cn}
+
+    ⚠️ 合并后的缺失诊断 + 质量检查 → data-cleaning skill EDA 节
     """
     df_all = None
     for name, df in sources.items():
@@ -195,13 +197,6 @@ def merge_multi_source(sources: dict, merge_on: list=["year"],
             n_before = len(df_all)
             df_all = pd.merge(df_all, df, on=merge_on, how=how)
             print(f"合并{name}: {n_before} → {len(df_all)} 行")
-
-    # 缺失诊断
-    miss_pct = df_all.isnull().mean() * 100
-    miss_vars = miss_pct[miss_pct>5].sort_values(ascending=False)
-    if len(miss_vars) > 0:
-        print(f"\n缺失率>5%的变量:")
-        print(miss_vars.round(1).to_string())
     return df_all
 
 df_final = merge_multi_source({
@@ -217,6 +212,9 @@ df_final.to_parquet("data/processed/merged_panel.parquet", index=False)
 ## 增量更新策略
 
 ```python
+import os
+import pandas as pd
+
 def incremental_update(existing_path: str, fetch_fn,
                        date_col: str="date") -> pd.DataFrame:
     """
