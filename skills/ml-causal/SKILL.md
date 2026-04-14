@@ -1,6 +1,11 @@
+---
+name: ml-causal
+description: "机器学习因果推断，含 DML、Causal Forest、DoWhy、AIPW"
+---
+
 # 机器学习因果推断
 
-适用场景：高维控制变量选择、异质性处理效应探索、ML辅助识别策略。触发关键词：DML、因果森林、LASSO、doubleml、grf、econml、ML因果、异质性处理效应、HTE。
+适用场景：高维控制变量选择、异质性处理效应探索、ML辅助识别策略。触发关键词：DML、因果森林、LASSO、doubleml、grf、econml、ML因果、异质性处理效应、HTE、DoWhy、AIPW。
 
 ---
 
@@ -21,12 +26,102 @@
 
 ---
 
-## 2. DML 基础
+## 2. DoWhy 因果推断工作流
 
-### 2.1 PLM vs IRM 选择
+> **定位：** DoWhy（微软 PyWhy 项目）是 Python 因果推断的上层框架，提供"建模→识别→估计→反驳"四步流程。
+> 它不是一个新的估计器，而是把你已有的所有工具（EconML、DoubleML）串成一个完整工作流。
+> 特别是 `refute_estimate()` API，提供了自动化的稳健性检验（安慰剂处理、随机混淆因子、数据子集）。
+
+### 2.1 四步标准流程
+
+```python
+import dowhy
+from dowhy import CausalModel
+import pandas as pd
+
+# Step 1: 建模（声明 DAG）
+model = CausalModel(
+    data=df,
+    treatment='D',
+    outcome='Y',
+    graph="digraph { D -> Y; X1 -> D; X1 -> Y; X2 -> Y; }"
+)
+# 也可用 common_causes 参数替代 graph：
+# model = CausalModel(data=df, treatment='D', outcome='Y',
+#                     common_causes=['X1', 'X2'])
+
+# Step 2: 识别（自动找调整集）
+identified = model.identify_effect(proceed_when_unidentifiable=True)
+print(identified)  # 输出识别策略（backdoor / frontdoor / IV）
+
+# Step 3: 估计（可调用 econml 后端）
+# 简单线性估计
+estimate_linear = model.estimate_effect(
+    identified,
+    method_name="backdoor.linear_regression"
+)
+print(estimate_linear)
+
+# 使用 econml CausalForestDML 后端
+estimate_cf = model.estimate_effect(
+    identified,
+    method_name="backdoor.econml.dml.CausalForestDML",
+    method_params={
+        "init_params": {"n_estimators": 500, "min_samples_leaf": 10},
+        "fit_params": {}
+    }
+)
+print(estimate_cf)
+
+# Step 4: 反驳（自动化稳健性检验）
+refute_placebo = model.refute_estimate(
+    identified, estimate_cf, method_name="placebo_treatment_refuter"
+)
+refute_random = model.refute_estimate(
+    identified, estimate_cf, method_name="random_common_cause"
+)
+refute_subset = model.refute_estimate(
+    identified, estimate_cf, method_name="data_subset_refuter",
+    subset_fraction=0.8
+)
+print(refute_placebo)
+print(refute_random)
+print(refute_subset)
+```
+
+### 2.2 反驳 API 详解
+
+| 反驳方法 | 做了什么 | 通过标准 |
+|---------|---------|---------|
+| `placebo_treatment_refuter` | 将 D 替换为随机噪声，重新估计 | 安慰剂效应应不显著（≈0） |
+| `random_common_cause` | 加入一个随机变量作为额外混淆因子 | 估计值不应大幅变化 |
+| `data_subset_refuter` | 在随机子样本上重新估计 | 估计值应在置信区间内稳定 |
+| `add_unobserved_common_cause` | 模拟不同强度的遗漏变量 | 结论在合理强度下不翻转 |
+
+### 2.3 DoWhy vs 直接用 EconML / DoubleML
+
+```text
+何时用 DoWhy：
+  - 你需要一个完整的"声明 DAG → 识别 → 估计 → 反驳"工作流
+  - 你想自动化稳健性检验（refute API）
+  - 你想调用多个后端（econml、线性回归）并比较
+
+何时直接用 EconML / DoubleML：
+  - 你的 DAG 和识别策略已经明确
+  - 你需要更精细的超参数控制
+  - 你要做 DML + DID / IV / RDD 等嵌套设计（DoWhy 对此支持有限）
+
+推荐：先用 DoWhy 做工作流原型 + 反驳检验，再用 EconML/DoubleML 做正式估计。
+```
+
+---
+
+## 3. DML 基础
+
+### 3.1 PLM vs IRM 选择
 
 | 维度 | PLM（部分线性模型） | IRM（交互随机模型） |
-|------|-------------------|--------------------|
+|------|-------------------|-------------------|
 | 效应设定 | 同质处理效应 | 允许异质处理效应 |
 | Estimand | **ATO**（不是ATE！） | ATE / ATT / CATE |
 | 适用条件 | 支撑弱/样本小 | 共同支撑充分/样本大 |
@@ -42,17 +137,14 @@ import numpy as np
 import pandas as pd
 from sklearn.linear_model import LogisticRegression
 
-# 估计倾向得分
 ps_model = LogisticRegression(max_iter=500)
 ps_model.fit(df[controls], df['D'])
 ps = ps_model.predict_proba(df[controls])[:, 1]
 
-# 检查极端值（缩尾到0.01-0.99）
 print(f"PS范围: [{ps.min():.3f}, {ps.max():.3f}]")
 print(f"PS < 0.05 比例: {(ps < 0.05).mean():.3f}")
 print(f"PS > 0.95 比例: {(ps > 0.95).mean():.3f}")
 
-# 缩尾
 ps_trimmed = np.clip(ps, 0.01, 0.99)
 ```
 
@@ -68,9 +160,9 @@ cat(sprintf("极端值(<0.05 or >0.95): %.1f%%\n", mean(ps < 0.05 | ps > 0.95) *
 
 ---
 
-### 2.2 Python 代码
+### 3.2 Python 代码
 
-#### doubleml — PLR（同质效应）
+#### doubleml — PLR（同质效应，二值处理）
 
 ```python
 import numpy as np
@@ -79,15 +171,13 @@ from doubleml import DoubleMLPLR, DoubleMLData
 from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
 from sklearn.linear_model import LassoCV
 
-# 数据格式
 dml_data = DoubleMLData(
     df,
-    y_col    = 'Y',       # 结果变量
-    d_cols   = 'D',       # 处理变量
-    x_cols   = controls   # 高维控制变量（list）
+    y_col    = 'Y',
+    d_cols   = 'D',
+    x_cols   = controls
 )
 
-# ML学习器
 ml_l = RandomForestRegressor(n_estimators=200, max_depth=5, random_state=42)
 ml_m = RandomForestClassifier(n_estimators=200, max_depth=5, random_state=42)
 
@@ -96,7 +186,6 @@ dml_plr = DoubleMLPLR(dml_data, ml_l=ml_l, ml_m=ml_m, n_folds=5)
 dml_plr.fit()
 print(dml_plr.summary)
 
-# 返回结果dict（不print）
 def get_dml_results(model):
     s = model.summary
     return {
@@ -105,10 +194,37 @@ def get_dml_results(model):
         'pval': s['P>|z|'].iloc[0],
         'ci_low':  s['2.5 %'].iloc[0],
         'ci_high': s['97.5 %'].iloc[0],
-        'nuisance_rmse': model.params_nuisance  # 诊断
+        'nuisance_rmse': model.params_nuisance
     }
 
 results_plr = get_dml_results(dml_plr)
+```
+
+#### doubleml — PLR（连续处理变量）
+
+> **⚠️ 关键区别：** 连续处理时，`ml_m` 必须是 **Regressor**（不是 Classifier！）。
+> 因为 D 不再是 0/1，而是连续值（如补贴金额、税率），需要回归模型预测 E[D|X]。
+
+```python
+from doubleml import DoubleMLPLR, DoubleMLData
+from sklearn.ensemble import RandomForestRegressor
+
+# 连续处理 DML（如补贴金额对投资的边际效应）
+dml_data_cont = DoubleMLData(
+    df,
+    y_col  = 'investment',
+    d_cols = 'subsidy_amount',     # 连续处理变量
+    x_cols = controls
+)
+
+ml_l = RandomForestRegressor(n_estimators=200, max_depth=5, random_state=42)
+ml_m_reg = RandomForestRegressor(n_estimators=200, max_depth=5, random_state=42)
+# ⚠️ ml_m 用 Regressor，不是 Classifier！
+
+dml_plr_cont = DoubleMLPLR(dml_data_cont, ml_l=ml_l, ml_m=ml_m_reg, n_folds=5)
+dml_plr_cont.fit()
+print(dml_plr_cont.summary)
+# 解读：coef 是 D 增加一个单位时 Y 的边际变化
 ```
 
 #### doubleml — IRM（异质效应，ATE/ATT）
@@ -116,7 +232,6 @@ results_plr = get_dml_results(dml_plr)
 ```python
 from doubleml import DoubleMLIRM
 
-# IRM估计（允许异质效应 → Estimand: ATE/ATT/CATE）
 ml_g = RandomForestRegressor(n_estimators=200, max_depth=5, random_state=42)
 ml_m2 = RandomForestClassifier(n_estimators=200, max_depth=5, random_state=42)
 
@@ -148,11 +263,11 @@ est_ate = LinearDML(
     cv      = 5
 )
 est_ate.fit(Y=df['Y'], T=df['D'], X=None, W=df[controls])
-print(est_ate.ate_)          # ATE点估计
-print(est_ate.ate_interval_())  # 置信区间
+print(est_ate.ate_)
+print(est_ate.ate_interval_())
 
 # 用法2: 估计CATE（含异质性特征X）
-hetero_features = ['age', 'size']   # 低维异质性变量
+hetero_features = ['age', 'size']
 remaining_controls = [c for c in controls if c not in hetero_features]
 
 est_cate = LinearDML(
@@ -163,23 +278,39 @@ est_cate = LinearDML(
 est_cate.fit(
     Y = df['Y'],
     T = df['D'],
-    X = df[hetero_features],      # 异质性特征
-    W = df[remaining_controls]    # 高维控制
+    X = df[hetero_features],
+    W = df[remaining_controls]
 )
-# CATE预测
 cate_pred = est_cate.effect(df[hetero_features])
+```
+
+#### 显式 AIPW ATE（LinearDRLearner, X=None）
+
+> **定位：** DRLearner 本质使用了 AIPW 评分函数。当只需要 ATE（不需要 CATE）时，设 `X=None` 即可。
+
+```python
+from econml.dr import LinearDRLearner
+from sklearn.ensemble import GradientBoostingClassifier, GradientBoostingRegressor
+
+aipw = LinearDRLearner(
+    model_propensity=GradientBoostingClassifier(n_estimators=100, random_state=42),
+    model_regression=GradientBoostingRegressor(n_estimators=100, random_state=42),
+    cv=5
+)
+aipw.fit(Y=df['Y'].values, T=df['D'].values, X=None, W=df[controls].values)
+print(aipw.ate_inference().summary_frame())
+# 输出：ATE, SE, t, p, 95% CI
 ```
 
 ---
 
-### 2.3 R 代码（DoubleML包）
+### 3.3 R 代码（DoubleML包）
 
 ```r
 library(DoubleML)
 library(mlr3)
 library(mlr3learners)
 
-# 数据格式
 df_dml <- df[, c("Y", "D", controls)]
 dml_data <- DoubleMLData$new(
   data      = df_dml,
@@ -188,7 +319,6 @@ dml_data <- DoubleMLData$new(
   x_cols    = controls
 )
 
-# 学习器
 lrn_l <- lrn("regr.ranger",  num.trees = 200, max.depth = 5)
 lrn_m <- lrn("classif.ranger", num.trees = 200, max.depth = 5,
               predict_type = "prob")
@@ -204,7 +334,7 @@ dml_irm <- DoubleMLIRM$new(
   dml_data,
   ml_g   = lrn_g,
   ml_m   = lrn_m,
-  score  = "ATE",    # 或 "ATTE"
+  score  = "ATE",
   n_folds = 5
 )
 dml_irm$fit()
@@ -213,20 +343,17 @@ print(dml_irm$summary())
 
 ---
 
-### 2.4 敏感性分析（必做）
+### 3.4 敏感性分析（必做）
 
 DoubleML 内置 Chernozhukov et al. (2022) 敏感性分析，评估违反CIA假设时估计稳健性：
 
 ```python
-# Python: DoubleML敏感性分析
 # cf_y: 结果方程中未观测混淆占总变异的比例（0-1）
 # cf_d: 处理方程中未观测混淆占总变异的比例（0-1）
 
 dml_plr.sensitivity_analysis(cf_y=0.1, cf_d=0.1)
 print(dml_plr.sensitivity_summary)
-# 解读：若sensitivity_params中的effect bounds包含0，结论对未观测混淆敏感
 
-# 扫描不同假设
 for cf in [0.05, 0.10, 0.15, 0.20]:
     dml_plr.sensitivity_analysis(cf_y=cf, cf_d=cf)
     bounds = dml_plr.sensitivity_params['theta']
@@ -234,11 +361,9 @@ for cf in [0.05, 0.10, 0.15, 0.20]:
 ```
 
 ```r
-# R: DoubleML敏感性分析
 dml_plr$sensitivity_analysis(cf_y = 0.1, cf_d = 0.1)
 print(dml_plr$sensitivity_summary())
 
-# 扫描
 for (cf in c(0.05, 0.10, 0.15, 0.20)) {
   dml_plr$sensitivity_analysis(cf_y = cf, cf_d = cf)
   cat(sprintf("cf=%.2f: %s\n", cf, dml_plr$sensitivity_summary()$conclusion))
@@ -247,9 +372,9 @@ for (cf in c(0.05, 0.10, 0.15, 0.20)) {
 
 ---
 
-## 3. Causal Forest
+## 4. Causal Forest
 
-### 3.1 Python — econml CausalForestDML
+### 4.1 Python — econml CausalForestDML
 
 ```python
 from econml.dml import CausalForestDML
@@ -265,37 +390,32 @@ cf = CausalForestDML(
 )
 cf.fit(Y=df['Y'], T=df['D'], X=df[hetero_features], W=df[remaining_controls])
 
-# CATE预测 + 置信区间
 cate       = cf.effect(df[hetero_features])
 cate_lb, cate_ub = cf.effect_interval(df[hetero_features], alpha=0.05)
 
-# 异质性特征重要性
 feat_imp = cf.feature_importances_
 imp_df = pd.DataFrame({'feature': hetero_features, 'importance': feat_imp})
 imp_df = imp_df.sort_values('importance', ascending=False)
 print(imp_df)
 ```
 
-### 3.2 R — grf causal_forest
+### 4.2 R — grf causal_forest
 
 ```r
 library(grf)
 
-# 准备矩阵
 X_mat <- as.matrix(df[, hetero_features])
 W_vec <- df$D
 Y_vec <- df$Y
 
-# 估计
 cf_r <- causal_forest(
   X = X_mat, Y = Y_vec, W = W_vec,
   num.trees        = 2000,
   min.node.size    = 10,
-  tune.parameters  = "all",   # 自动调参
+  tune.parameters  = "all",
   seed             = 42
 )
 
-# CATE预测
 tau_hat <- predict(cf_r, X_mat, estimate.variance = TRUE)
 df$cate      <- tau_hat$predictions
 df$cate_se   <- sqrt(tau_hat$variance.estimates)
@@ -303,9 +423,7 @@ df$cate_se   <- sqrt(tau_hat$variance.estimates)
 # 线性投影（检验异质性统计显著性）
 blp <- best_linear_projection(cf_r, A = X_mat)
 print(blp)
-# 若任意系数显著 → 异质性存在
 
-# 变量重要性
 vi <- variable_importance(cf_r)
 imp_r <- data.frame(feature = hetero_features, importance = vi)
 imp_r <- imp_r[order(-imp_r$importance), ]
@@ -314,41 +432,35 @@ print(imp_r)
 
 ---
 
-### 3.3 ⚠️ 面板数据警告
+### 4.3 ⚠️ 面板数据警告
 
 **标准CausalForest假设截面独立同分布数据。面板数据上直接运行会将个体固定效应误认为处理效应异质性，导致CATE估计严重偏误。**
 
 **正确处理方式：先对Y和D做FE demean，再跑CF**
 
 ```python
-# Python: 面板数据 FE demean → CausalForest
 import pandas as pd
 import numpy as np
 from econml.dml import CausalForestDML
 
-# Step 1: FE demean（去除个体均值）
 df['Y_dm'] = df['Y'] - df.groupby('entity_id')['Y'].transform('mean')
 df['D_dm'] = df['D'] - df.groupby('entity_id')['D'].transform('mean')
-# 若有时间FE：再去除时间均值
 df['Y_dm'] = df['Y_dm'] - df.groupby('time')['Y_dm'].transform('mean')
 df['D_dm'] = df['D_dm'] - df.groupby('time')['D_dm'].transform('mean')
 
-# Step 2: 在demean后的数据上跑CF（此时不需要再控制FE）
 cf_panel = CausalForestDML(n_estimators=500, cv=5, random_state=42)
 cf_panel.fit(
     Y = df['Y_dm'],
     T = df['D_dm'],
     X = df[hetero_features],
-    W = df[time_varying_controls]   # 时变控制变量（也需demean）
+    W = df[time_varying_controls]
 )
 ```
 
 ```r
-# R: 面板数据 FE demean → causal_forest
 library(dplyr)
 library(grf)
 
-# FE demean
 df <- df %>%
   group_by(entity_id) %>%
   mutate(Y_dm = Y - mean(Y), D_dm = D - mean(D)) %>%
@@ -367,7 +479,7 @@ cf_panel <- causal_forest(
 
 ---
 
-### 3.4 ⚠️ 红线：CF ≠ 因果识别
+### 4.4 ⚠️ 红线：CF ≠ 因果识别
 
 ```
 CF 只在 CIA（条件独立假设）成立时有因果解释。
@@ -385,25 +497,108 @@ CF 只在 CIA（条件独立假设）成立时有因果解释。
 
 ---
 
-## 4. LASSO 变量选择
+## 5. CATE 估计器比较（RScorer 标准流程）
+
+> **问题：** 跑完多个 CATE 估计器后，怎么选最优？
+>
+> **答案：** 用 EconML 的 `RScorer`（R-Score，R² 的处理效应版本）。
+> 它提供无偏的 CATE 模型选择标准，不需要 ground truth。
+
+### 5.1 方法选择决策树（含 R-Learner）
+
+```text
+你的 CATE 估计目标是什么？
+
+├── 需要可解释的线性系数 → LinearDML / LinearDRLearner
+├── 允许非参数、关注预测精度 → CausalForestDML / ForestDRLearner
+├── 处理/控制样本极不均衡 → X-Learner
+├── 想用残差化损失直接优化 τ(x) → R-Learner（BaseRRegressor in CausalML）
+│   → R-Learner 与 CausalForestDML 残差化思想一致
+│   → 适合 ML 背景用户；代码见 causalml-modules-4.md
+└── 不确定 → 跑多个方法 + RScorer 选最优
+```
+
+### 5.2 标准比较流程
+
+```python
+from econml.score import RScorer
+from econml.dml import LinearDML, CausalForestDML
+from econml.dr import DRLearner
+from econml.meta import XLearner
+from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier, GradientBoostingRegressor
+import pandas as pd
+
+# Step 1: 跑多个 CATE 估计器
+estimators = {}
+
+# LinearDML
+est_lin = LinearDML(model_y=RandomForestRegressor(100, random_state=42),
+                    model_t=RandomForestClassifier(100, random_state=42), cv=5)
+est_lin.fit(Y=df['Y'], T=df['D'], X=df[hetero_features], W=df[remaining_controls])
+estimators['LinearDML'] = est_lin.effect(df[hetero_features])
+
+# CausalForestDML
+est_cf = CausalForestDML(model_y=RandomForestRegressor(100, random_state=42),
+                         model_t=RandomForestClassifier(100, random_state=42),
+                         n_estimators=500, cv=5, random_state=42)
+est_cf.fit(Y=df['Y'], T=df['D'], X=df[hetero_features], W=df[remaining_controls])
+estimators['CausalForestDML'] = est_cf.effect(df[hetero_features])
+
+# DRLearner
+est_dr = DRLearner(model_propensity=GradientBoostingRegressor(100),
+                   model_regression=GradientBoostingRegressor(100), cv=5)
+est_dr.fit(Y=df['Y'].values, T=df['D'].values,
+           X=df[hetero_features].values, W=df[remaining_controls].values)
+estimators['DRLearner'] = est_dr.effect(df[hetero_features].values)
+
+# X-Learner
+est_x = XLearner(models=GradientBoostingRegressor(100, random_state=42),
+                 propensity_model=GradientBoostingClassifier(100, random_state=42))
+est_x.fit(Y=df['Y'].values, T=df['D'].values, X=df[hetero_features].values)
+estimators['XLearner'] = est_x.effect(df[hetero_features].values)
+
+# Step 2: RScorer 评分
+scorer = RScorer(
+    model_y=GradientBoostingRegressor(100, random_state=42),
+    model_t=GradientBoostingRegressor(100, random_state=42),
+    cv=5, random_state=42
+)
+scorer.fit(df['Y'].values, df['D'].values,
+           X=df[hetero_features].values, W=df[remaining_controls].values)
+
+scores = {}
+for name, tau in estimators.items():
+    scores[name] = scorer.score(tau)
+    print(f"{name:20s}: R-Score = {scores[name]:.4f}")
+
+# Step 3: 选择最高 R-Score 的方法作为主规格
+best = max(scores, key=scores.get)
+print(f"\n推荐方法：{best}（R-Score = {scores[best]:.4f}）")
+```
+
+### 5.3 解读提醒
+
+- R-Score 越高越好；负值说明该方法的 CATE 比常数效应还差
+- RScorer 本身也依赖 nuisance 模型质量，报告时应说明 `model_y` / `model_t` 选择
+- 最终选定方法后，仍应报告该方法的 ATE 置信区间和敏感性分析
+
+---
+
+## 6. LASSO 变量选择
 
 LASSO用于高维控制变量筛选，或作为DML中的ML学习器。
 
 ```python
-# Python: LASSO变量选择
 from sklearn.linear_model import LassoCV
 import numpy as np
 import pandas as pd
 
-# CV选最优lambda
 lasso = LassoCV(cv=5, max_iter=5000, random_state=42)
 lasso.fit(df[candidate_controls], df['Y'])
 
-# 选出非零系数变量
 selected = [v for v, c in zip(candidate_controls, lasso.coef_) if abs(c) > 1e-8]
 print(f"LASSO选出 {len(selected)}/{len(candidate_controls)} 个变量: {selected}")
 
-# 返回结果dict
 def lasso_selection(X, y, candidates):
     model = LassoCV(cv=5, max_iter=5000, random_state=42).fit(X, y)
     selected = [v for v, c in zip(candidates, model.coef_) if abs(c) > 1e-8]
@@ -411,17 +606,14 @@ def lasso_selection(X, y, candidates):
 ```
 
 ```r
-# R: LASSO变量选择（glmnet）
 library(glmnet)
 
 X_mat <- as.matrix(df[, candidate_controls])
 y_vec <- df$Y
 
-# CV选lambda
 cv_lasso <- cv.glmnet(X_mat, y_vec, alpha = 1, nfolds = 5)
-lambda_1se <- cv_lasso$lambda.1se   # 更保守（推荐）
+lambda_1se <- cv_lasso$lambda.1se
 
-# 提取选中变量
 coefs <- coef(cv_lasso, s = "lambda.1se")
 selected_r <- rownames(coefs)[which(abs(coefs) > 1e-8)]
 selected_r <- selected_r[selected_r != "(Intercept)"]
@@ -440,9 +632,9 @@ cat("lambda.1se =", lambda_1se, "\n")
 
 ---
 
-## 5. DML + 识别框架嵌套
+## 7. DML + 识别框架嵌套
 
-### 5.1 DML + DID
+### 7.1 DML + DID
 
 **⚠️ 红线：不能把固定效应哑变量作为高维X放入PLM。**
 
@@ -451,7 +643,6 @@ cat("lambda.1se =", lambda_1se, "\n")
 正确做法：先FE demean，再在demean数据上做DML。
 
 ```python
-# Python: DML+DID 正确流程
 import pandas as pd
 from doubleml import DoubleMLPLR, DoubleMLData
 from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
@@ -467,7 +658,7 @@ df['D_dm'] = (df['D']
     - df.groupby('time')['D'].transform('mean')
     + df['D'].mean())
 
-# Step 2: DML on demeaned data（controls也需demean）
+# Step 2: DML on demeaned data
 for c in high_dim_controls:
     df[f'{c}_dm'] = (df[c]
         - df.groupby('entity_id')[c].transform('mean')
@@ -491,17 +682,16 @@ print(dml_plr_did.summary)
 
 ---
 
-### 5.2 DML + IV（DoubleMLIIVM）
+### 7.2 DML + IV（DoubleMLIIVM）
 
 ```python
-# Python: DML + IV（内生处理变量）
 from doubleml import DoubleMLIIVM
 
 dml_data_iv = DoubleMLData(
     df,
     y_col    = 'Y',
-    d_cols   = 'D',       # 内生处理变量
-    z_cols   = 'Z',       # 工具变量
+    d_cols   = 'D',
+    z_cols   = 'Z',
     x_cols   = controls
 )
 
@@ -511,7 +701,7 @@ ml_r = RandomForestClassifier(n_estimators=200, random_state=42)
 
 dml_iivm = DoubleMLIIVM(
     dml_data_iv, ml_g=ml_g, ml_m=ml_m, ml_r=ml_r,
-    score='LATE',    # Estimand: LATE（工具变量识别的局部平均处理效应）
+    score='LATE',
     n_folds=5
 )
 dml_iivm.fit()
@@ -520,25 +710,20 @@ print(dml_iivm.summary)
 
 ---
 
-### 5.3 DML + RDD
+### 7.3 DML + RDD
 
 RDD场景中，DML只对Y做残差化，**不对D做残差化**（D在断点处的跳变是识别来源，不能被ML吸收）。
 
 ```python
-# Python: DML + RDD（仅对Y残差化）
-# 保留断点附近带宽内样本
 df_rdd = df[(df['running_var'] >= cutoff - bandwidth) &
             (df['running_var'] <= cutoff + bandwidth)].copy()
 
-# 只对Y做ML残差化
 ml_y = RandomForestRegressor(n_estimators=200, random_state=42)
 ml_y.fit(df_rdd[controls], df_rdd['Y'])
 df_rdd['Y_resid'] = df_rdd['Y'] - ml_y.predict(df_rdd[controls])
 
-# 保留D的跳变（treat = 1 if running_var >= cutoff）
 df_rdd['treat'] = (df_rdd['running_var'] >= cutoff).astype(int)
 
-# 在Y残差上做RDD
 import statsmodels.formula.api as smf
 rdd_dml = smf.ols(
     'Y_resid ~ treat + running_var + treat:running_var',
@@ -549,7 +734,7 @@ print(rdd_dml.summary())
 
 ---
 
-## 6. 实践指南
+## 8. 实践指南
 
 **① 识别优先，估计其次**
 先确认因果识别策略（CIA/DID/IV/RDD），再决定是否用DML提升效率。
@@ -558,7 +743,6 @@ print(rdd_dml.summary())
 报告Y方程和D方程的out-of-fold RMSE。RMSE远高于基准（如均值预测）说明ML未能有效控制混淆。
 
 ```python
-# 提取nuisance RMSE
 rmse_info = dml_plr.params_nuisance
 print("Y方程 RMSE:", rmse_info)
 ```
@@ -573,7 +757,7 @@ print("Y方程 RMSE:", rmse_info)
 
 ---
 
-## 7. Estimand 声明
+## 9. Estimand 声明
 
 | 方法 | Estimand | 声明要点 |
 |------|----------|---------|
@@ -582,6 +766,8 @@ print("Y方程 RMSE:", rmse_info)
 | DML IRM score='ATTE' | ATT | 处理组在对照组支撑内 |
 | DML IIVM | LATE（工具变量Compliers） | 同IV；描述Complier特征 |
 | Causal Forest | CATE（条件ATE） | 仅CIA下有因果解释；先建立主效应 |
+| AIPW (LinearDRLearner) | ATE | 双重稳健；倾向得分或结果模型之一正确即一致 |
+| R-Learner | CATE | 残差化直接优化；与 DML 思想等价 |
 
 **声明模板：**
 > "本文在[识别策略]成立的前提下，采用DML-PLR估计核心参数。DML利用随机森林控制高维控制变量，通过5折交叉拟合避免过拟合偏误。在共同支撑域上，该估计量收敛于ATO（Average Treatment on Overlap）。敏感性分析（Chernozhukov et al., 2022）显示，在cf_y=cf_d=0.10的未观测混淆假设下，结论依然稳健。"
@@ -607,7 +793,6 @@ est.fit(Y=panel_matrix, T=treatment_matrix)
 from econml.panel.dml import DynamicDML
 from sklearn.ensemble import RandomForestRegressor
 
-# 数据必须按 (entity_id, time) 排序
 panel = df.sort_values(['unit_id', 'time']).reset_index(drop=True)
 
 est = DynamicDML(
@@ -616,16 +801,14 @@ est = DynamicDML(
     cv      = 3
 )
 
-# 正确API：长格式一维向量 + groups标识个体
 est.fit(
-    Y      = panel['Y'].values,       # 长格式向量，shape=(N*T,)
-    T      = panel['D'].values,       # 长格式向量，shape=(N*T,)
+    Y      = panel['Y'].values,
+    T      = panel['D'].values,
     X      = panel[hetero_features].values if hetero_features else None,
     W      = panel[controls].values,
     groups = panel['unit_id'].values   # ⚠️ 关键：个体ID标识
 )
 
-# 动态效应：lag=0当期，lag=1滞后一期，...
 effects = est.const_marginal_effect_inference(
     X = panel[hetero_features].values[:panel['unit_id'].nunique()] if hetero_features else None
 )
@@ -636,3 +819,33 @@ print(effects.summary_frame())
 - 必须传入；标识哪些行属于同一个体
 - 确保同一个体的所有观测连续排列
 - 时间期数T必须对每个个体相同（平衡面板）
+
+---
+
+## 前沿标注
+
+> **因果发现（Causal Discovery）**
+>
+> 当 DAG 结构不确定时，可用算法从数据中学习因果图：
+> - **PC 算法**（`causal-learn` 包，PyWhy 生态）：基于条件独立检验
+> - **NOTEARS**（Zheng et al., 2018）：连续优化版结构学习
+> - **FCI 算法**：允许存在潜在混淆因子
+>
+> ⚠️ 注意：因果发现结果需经济理论验证，不能盲目信赖。
+> 数据驱动的 DAG 应作为"辅助工具"，而不是替代研究者的识别论证。
+> 目前本 skill 聚焦于因果**估计**，因果发现属于前沿拓展方向。
+
+---
+
+## 输出规范
+
+```text
+output/
+  dml_baseline.csv
+  dml_sensitivity.csv
+  causal_forest_cate.csv
+  causal_forest_importance.csv
+  cate_comparison_rscorer.csv
+  dowhy_refutation.csv
+  lasso_selected_vars.csv
+```
