@@ -1,10 +1,60 @@
+---
+name: empirical-pipeline
+description: "实证论文全流程调度，Stage -1 到 Stage 5，含 Gate 检查与 Worker-Critic 配对"
+disable-model-invocation: true
+---
+
 # 一站式实证论文生成流水线
 
-Pipeline: S0 → S1 → S2 → S3 → ◆Gate1 → S4 → S5
+Pipeline: S-1 → S0 → S1 → S2 → S3 → ◆Gate1 → S4 → S5
+
+---
+
+## Stage -1: 研究规格书生成（条件触发）
+
+触发条件：`quality_reports/research_spec_*.md` 不存在时自动触发。如已存在 → 跳过。
+
+### 入口分流（1 题）
+
+提问："你当前的研究想法处于哪个阶段？"
+- A "有明确问题和大致方法" → 6 步快问快答
+- B "有方向但没想清楚" → 6 步 + 每步允许"不确定"，提供选项辅助
+- C "只有模糊兴趣" → 自由对话，收敛到可检验问题后转入 B 模式
+
+模式 C 策略：依次问"对什么现象好奇？→ 关心它的原因还是影响？→ 最近有相关政策/数据变化吗？" 用户选定方向后转 B。3 轮仍无法收敛 → 建议先读 5 篇文献再回来。
+
+### 6 步访谈
+
+| 步骤 | 提问 | "不确定"时的辅助（仅 B 模式） |
+|------|------|-------------------------------|
+| 1. 现象 | "你想研究什么现象？为什么重要？" | 提供该领域近年热点（读取 domain-profile） |
+| 2. 机制 | "X 通过什么机制影响 Y？" | 提示常见渠道：信息/激励/资源/制度 |
+| 3. 数据 | "你有什么数据？或计划用什么？" | 列出领域常用数据源 |
+| 4. 识别 | "有什么外生冲击/准实验变异？" | 提示领域常用策略；仍无法回答 → ⚠️ 提示缺乏因果基础 |
+| 5. 预期 | "预期结果什么方向？相反意味着什么？" | 可标记 [TBD]，不阻塞 |
+| 6. 贡献 | "和最接近的 3 篇文献相比，差异点？" | 可标记 [TBD]，或触发 literature-review 辅助 |
+
+A 模式：6 步必答。B 模式：步骤 5-6 可输出 [TBD]，Stage 0 补全。
+
+### 输出
+
+1. `quality_reports/research_spec_[topic].md` — 基于 `templates/research-spec-template.md` 填充
+2. `.claude/references/domain-profile.md`（如不存在）— 基于 `templates/domain-profile-template.md` 填充
+
+research_spec 含 [TBD] 字段时 → Stage 0 优先补全，再走 0.1-0.5。
 
 ---
 
 ## Stage 0: 研究设计协作
+
+### 0.0 前置文件检查
+
+| 文件 | 路径 | 缺失时 |
+|------|------|--------|
+| 研究规格书 | `quality_reports/research_spec_*.md` | 回退 Stage -1 |
+| 领域档案 | `.claude/references/domain-profile.md` | 回退 Stage -1 |
+| 期刊画像 | `.claude/references/journal-profiles.md` | 提示检查仓库 |
+| 内生性路由 | `.claude/references/endogeneity-routing.md` | 提示检查仓库 |
 
 ### 0.1 因果问题拆解（依次提问）
 
@@ -73,7 +123,7 @@ DAG 贯穿全流程：
 
 ### 0.5 Research Design Memo
 
-必须在 Gate 1 前完成，保存到 `empirical-pipeline/templates/research-design-memo.md`。
+必须在 Gate 1 前完成，保存到 `quality_reports/research_design_memo_[topic].md`。
 
 | 字段 | 内容 |
 |------|------|
@@ -287,22 +337,20 @@ DAG 贯穿全流程：
 ## Stage 5: 论文 + 输出
 
 ### 5.1 论文写作
-调用 `paper-writing` skill，生成 IMRaD 结构：
 
-**强制：Estimand 声明段**（第3节或数据与方法节开头）
-```
-本文的目标参数（Estimand）为[ATT/LATE/ATE/ATO]，
-具体定义为[形式化定义]。
-识别假设为[核心假设]。
-在[样本/时间/条件]下，本文估计[处理组/边际遵从者/整体]的
-[X]对[Y]的[局部/平均]因果效应。
-```
+调用 `paper-writing` skill，按节依次生成。
 
-写作规范：
-- 不用"值得注意的是""综上所述""取决于"
-- 不用感叹号
-- 系数解释模板："[X]每增加1个单位，[Y]平均变化[β]个单位（或百分比），
-  该效应在[显著性水平]下统计显著。"
+推荐写作顺序：`background → strategy → data → results → conclusion → intro → abstract`
+
+argument 格式：`[section] [--journal NAME] [--lang cn|en]`
+
+paper-writing skill 会自动读取：
+- `.claude/references/domain-profile.md` → 领域惯例校准
+- `.claude/references/journal-profiles.md` → 期刊风格校准
+- `quality_reports/research_spec_*.md` → 研究问题/贡献
+- `quality_reports/research_design_memo_*.md` → 识别策略/Estimand
+
+详细写作规范、LaTeX 模板、节级模板见 `skills/paper-writing/`。
 
 ### 5.2 输出规范
 
@@ -319,13 +367,10 @@ DAG 贯穿全流程：
 
 触发条件：用户请求，或论文完成后的可选步骤。
 
-模拟审稿人提问清单：
-- 识别假设是否可信？（最核心）
-- 预趋势是否通过？
-- 效果量级是否合理？
-- 有无遗漏重要控制变量？
-- 稳健性是否充分？
-- 机制是否有识别支撑？
+调用 `methods-referee` agent（Task 分派），执行：
+- 6维审稿评分（STRUCTURAL / CREDIBILITY / MEASUREMENT / POLICY / THEORY / SKEPTIC）
+- 可指定目标期刊：`--peer [journal]`（读取 `.claude/references/journal-profiles.md` 校准）
+- 输出审稿报告至 `quality_reports/referee_report_*.md`
 
 ### 5.4 Beamer（可选）
 调用 `beamer-ppt` skill，生成15-20页学术汇报：
@@ -341,21 +386,65 @@ Title → Motivation → Literature → Contribution → Data → Strategy → R
 
 建议：使用多模型交叉审核（Claude + 其他模型）检查数字一致性。
 
+### 5.6 审稿回复（R&R 阶段，条件触发）
+
+触发条件：收到审稿意见后，用户手动触发。
+
+调用 `respond-to-referees` agent（Task 分派），执行：
+- 解析审稿意见 → 逐条分类（方法/数据/写作/格式）
+- 生成 Response Letter（逐条回复 + 修改位置标注）
+- 调用 paper-writing skill 修改对应章节
+- 输出 `output/response_letter.tex` + 修改稿 diff
+
 ---
 
-## 附录：Skill 调用速查
+## 附录A：Skill 调用速查
 
-| Stage | 调用 Skill |
-|-------|------------|
-| S0 | （内嵌，无需调用外部skill） |
-| S1 | data-cleaning, stats |
-| S2 | figure, stats |
-| S3 | did-analysis / iv-estimation / rdd-analysis / panel-data / synthetic-control / ols-regression / ml-causal / time-series |
-| S4 | 同上 + mechanism-analysis + figure + table |
-| S5 | paper-writing + literature-review + table + figure + beamer-ppt |
+| Stage | 调用 Skill | 调用 Agent |
+|-------|-----------|-----------|
+| S-1 | literature-review（可选辅助） | — |
+| S0 | （内嵌） | — |
+| S1 | data-cleaning, stats | — |
+| S2 | figure, stats | — |
+| S3 | 方法 skill（did/iv/rdd/panel/sc/ols/ml-causal/ts） | — |
+| S4 | 同上 + mechanism-analysis + figure + table | methods-referee（Gate 2 触发时） |
+| S5 | paper-writing, literature-review, table, figure, beamer-ppt | methods-referee, respond-to-referees |
 
 辅助 skill（按需调用）：
 - `data-fetcher`：获取 FRED/WB/OECD/akshare 数据
 - `stats`：描述统计/Balance Table/VIF
 - `figure`：事件研究图/系数图/RDD图
 - `table`：三线表/回归表/LaTeX格式化
+
+## 附录B：共享文件路径速查
+
+| 文件 | 路径 | 写入者 | 读取者 |
+|------|------|--------|--------|
+| domain-profile | `.claude/references/domain-profile.md` | Stage -1 | pipeline, paper-writing, lit-review, referee |
+| journal-profiles | `.claude/references/journal-profiles.md` | 预置 | paper-writing, referee |
+| endogeneity-routing | `.claude/references/endogeneity-routing.md` | 预置 | 方法 skill |
+| research-spec | `quality_reports/research_spec_*.md` | Stage -1 | pipeline, paper-writing |
+| research-design-memo | `quality_reports/research_design_memo_*.md` | Stage 0.5 | pipeline, paper-writing |
+""".strip()
+
+import os
+os.makedirs("output", exist_ok=True)
+with open("output/empirical-pipeline-SKILL.md", "w", encoding="utf-8") as f:
+    f.write(pipeline_skill)
+
+original = 6730
+new = len(pipeline_skill)
+prev_version = 9313
+
+print(f"原版 (file:118):     {original} chars")
+print(f"上一版 (v2):         {prev_version} chars")
+print(f"本版 (v3):           {new} chars")
+print(f"vs 原版:             +{new - original} ({(new-original)/original*100:.1f}%)")
+print(f"vs 上一版:           {new - prev_version:+d} ({(new-prev_version)/prev_version*100:.1f}%)")
+
+# Count the Stage -1 section specifically
+s1_start = pipeline_skill.index("## Stage -1")
+s0_start = pipeline_skill.index("## Stage 0")
+stage_minus1 = pipeline_skill[s1_start:s0_start]
+print(f"\nStage -1 单独:       {len(stage_minus1)} chars")
+print(f"Stage 0-5 + 附录:    {new - len(stage_minus1)} chars (≈原版)")
