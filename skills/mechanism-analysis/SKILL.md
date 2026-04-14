@@ -1,706 +1,474 @@
-# 机制分析
+---
+name: mechanism-analysis
+description: "机制分析，默认推荐两步法，兼容三步法、分组回归与调节效应"
+---
 
-机制分析回答"为什么 X 影响 Y"，通过引入中介变量或调节变量揭示因果链条。在建立基准因果效应之后进行，是顶刊论文从"好到卓越"的关键步骤。
+# 机制分析（Mechanism Analysis）
 
-**语言：** Python（statsmodels / linearmodels）+ R（fixest / mediation / marginaleffects）。无 Stata。所有函数参数传入，不使用 `input()`。
+## 概述
+
+机制分析的目标不是机械地“分解系数”，而是解释：处理变量 `D` 为什么会影响结果变量 `Y`。本 skill 采用**渐进式**设计：先用识别要求最低、最稳妥的方法完成主论证；只有在研究问题和识别条件都允许时，才进入量化间接效应或处理机制变量内生性的进阶路径。
+
+> **方法论立场声明**
+>
+> 传统中介效应逐步法（尤其是 Step3: `Y ~ D + M`）在经济学因果推断中存在根本性争议。核心问题是：即使 `D` 是外生的，中介变量 `M` 往往不是随机分配的，仍可能受到遗漏变量、反向因果和测量误差影响。因此，Step3 中 `M` 的系数，以及由此构造的“间接效应”“中介百分比”，通常**不具有明确的因果含义**。
+>
+> 因此，本 skill 的默认推荐顺序是：
+> 1. **默认：两步法**（先确认 `D → Y`，再检验 `D → M`，并用理论/文献支撑 `M → Y`）
+> 2. **兼容：三步法**（仅用于回应传统审稿习惯，定位为描述性证据）
+> 3. **进阶：因果中介 / IV-mediation / 残差法**（见 `ADVANCED.md`）
+>
+> 简言之：**先识别，再量化；先主论证，再补充审稿人偏好的表格。**
 
 ---
 
-## 0. 强制前置：DAG 绘制
+## 适用条件
 
-**在跑任何机制回归之前，必须画因果图（DAG）。** 确认 M 是中介、调节还是对撞变量，才能决定后续策略。
+机制分析适用于以下场景：
+- 你已经有可信的主效应识别（如 OLS + 强识别、DID、RDD、IV、SCM）
+- 你想解释 `D` 影响 `Y` 的具体传导路径
+- 你能提出一个具有经济学含义的候选机制变量 `M`
+- 你知道 `M` 是中介、调节变量、前定变量，还是可能的坏控制
 
-### 文字描述 DAG 模板
-
-```
-本文提出如下因果链条：
-  处理变量 X（政策/事件）→ 中介变量 M（企业融资约束）→ 结果变量 Y（投资规模）
-直接效应：X 同时对 Y 存在直接影响（X → Y 直接路径）。
-混淆因子：宏观经济冲击 Z 同时影响 X 和 Y，已通过时间固定效应控制。
-M 满足中介变量三大条件：
-  (1) M 在 X 之后、Y 之前发生（时序逻辑成立）
-  (2) X 显著影响 M（第一步回归验证）
-  (3) M 显著影响 Y，X→Y 效应在控制 M 后发生变化
-```
-
-### dagitty R 代码（核心 10 行）
-
-```r
-# ============================================================
-# DAG — R（dagitty，核心功能）
-# install.packages("dagitty")
-# ============================================================
-library(dagitty)
-
-dag_spec <- dagitty('
-  dag {
-    X [exposure, pos="0,1"]; Y [outcome, pos="2,1"]
-    M [pos="1,1"];            Z [pos="1,2"]
-    X -> M -> Y;  X -> Y;    Z -> X;  Z -> Y
-  }
-')
-
-# 最小充分调整集：若 M 出现 → M 是混淆因子（非中介！）
-adjustmentSets(dag_spec, exposure="X", outcome="Y")
-
-# 隐含条件独立性（可检验假设，与数据不符则需修改 DAG）
-impliedConditionalIndependencies(dag_spec)
-
-# M 角色判断
-cat("M 是 Y 的祖先（中介路径存在）:", isAncestorOf(dag_spec,"M","Y"), "\n")
-cat("M 是 X 的后代（受 X 影响）:",    isDescendantOf(dag_spec,"X","M"), "\n")
-```
-
-### Python networkx DAG 可视化
-
-```python
-# ============================================================
-# DAG 可视化 — Python（networkx，简单版）
-# ============================================================
-import networkx as nx
-import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
-
-def draw_dag(edges, node_roles=None, title="因果图（DAG）"):
-    """
-    edges      : list of (src, dst) 元组
-    node_roles : dict，例 {'X':'exposure','Y':'outcome','M':'mediator','Z':'confounder'}
-    对撞变量（collider）角色 → 红色警告
-    """
-    node_roles = node_roles or {}
-    G = nx.DiGraph(); G.add_edges_from(edges)
-    color_map = {'exposure':'#20808D','outcome':'#A84B2F',
-                 'mediator':'#FFC553','confounder':'#7A7974','collider':'#A13544'}
-    colors = [color_map.get(node_roles.get(n,''),'#D4D1CA') for n in G.nodes()]
-    pos = nx.spring_layout(G, seed=42)
-    fig, ax = plt.subplots(figsize=(7,4))
-    nx.draw_networkx(G, pos, ax=ax, node_color=colors, node_size=1800,
-                     font_size=12, font_color='white', arrowsize=20,
-                     edge_color='#393836', width=2)
-    ax.set_title(title, fontsize=13); ax.axis('off')
-    plt.tight_layout()
-    plt.savefig('output/dag.png', dpi=150)
-    return fig
-```
-
-### 根据 DAG 判断 M 的角色
-
-| M 的结构 | 角色 | 后续方法 |
-|----------|------|----------|
-| X → M → Y | 中介变量 | 两步法 / 三步法 / 因果中介 |
-| M 影响 X→Y 强度，M 不被 X 影响 | 调节变量 | 交互项法 / 分组回归 |
-| X → M ← Y（M 同时被 X 和 Y 影响）| **对撞变量** | **拒绝执行 + 警告** |
-| M 在处理前已确定 | 前定变量 | 作为控制变量，非中介 |
+**不适用或需谨慎的场景：**
+- 主效应本身尚未识别清楚
+- `M` 明显可能是对撞变量（collider）
+- `M` 与 `Y` 同时受共同遗漏变量影响，但你又试图用 OLS 直接解释 `M → Y`
+- 研究者只是“看到数据里有个会动的变量”就将其包装成机制
 
 ---
 
-## 1. 何时需要机制分析
+## 渐进式路线图
 
-### 需要做
+```text
+Level 1（默认主路径）
+  DAG 判断 M 的角色
+  → 两步法
+  → 完成主机制论证
 
-| 情形 | 举例 |
-|------|------|
-| 多条可能机制路径 | 税收优惠影响投资：减税路径 vs 融资约束缓解 |
-| 审稿人质疑因果机制 | 最低工资就业：替代效应 vs 效率工资 |
-| 政策设计需区分机制 | 培训补贴：技能提升 vs 信号机制 |
+Level 2（兼容审稿人）
+  两步法
+  → 完整三步法 / 三步法变体
+  → 明确标注为描述性补充
 
-### 不需要做
-
-- 机制唯一且直接（如降息导致贷款利率下降）
-- 数据中无可靠中介变量，强行找替代指标降低可信度
-
----
-
-## 2. 方法选择决策树
-
-```
-M 在 DAG 中的位置？
-├── 中介变量（X → M → Y，M 受 X 影响并影响 Y）
-│   ├── 只需证明 X → M 存在
-│   │   → 两步法（默认推荐，顶刊接受度最高）
-│   ├── 需量化间接效应占比
-│   │   → 残差法（Bleemer-Mehta 风格）[管理学接受度有限]
-│   ├── M 本身存在内生性
-│   │   → 因果中介效应（R: mediation + medsens() 敏感性，必做！）
-│   └── 需兼容传统审稿人
-│       → 完整三步法 [注意：Step3 中 M 是坏控制变量，审稿人可能质疑]
-│
-├── 调节变量（M 不被 X 影响，影响 X→Y 效应强度）
-│   ├── M 连续 → 交互项法 + 边际效应图
-│   └── M 离散 → 分组回归 + Fisher 置换检验
-│
-└── 不确定 → 回到 DAG，重新确认时序逻辑和因果方向
+Level 3（需要更强量化）
+  因果中介分析 / IV-mediation / 残差法
+  → 见 ADVANCED.md
 ```
 
 ---
 
-## 3. 五种核心方法
-
-### 3.1 两步法（默认推荐）
-
-逻辑：分别跑 Y ~ X 和 M ~ X，证明 X 同时影响 Y 和 M。不要求量化间接效应，回避坏控制变量问题，顶刊首选。
-
-```python
-# ============================================================
-# 两步法 — Python（linearmodels PanelOLS）
-# ============================================================
-from linearmodels.panel import PanelOLS
-import statsmodels.api as sm
-import numpy as np
-
-def two_step_mechanism(df, outcome, mediator, did_var, controls=None,
-                        unit_id='unit_id', time='time'):
-    """
-    Y~X + M~X 并排输出。
-    Returns: dict{'res_y', 'res_m'}
-    """
-    controls = controls or []
-    df_panel = df.set_index([unit_id, time])
-    X = sm.add_constant(df_panel[[did_var]+controls])
-    def fit(dep):
-        return PanelOLS(df_panel[dep], X,
-                        entity_effects=True, time_effects=True
-                       ).fit(cov_type='clustered', cluster_entity=True)
-    res_y, res_m = fit(outcome), fit(mediator)
-
-    print(f"{'':22} {'Y（结果）':>14} {'M（机制）':>14}")
-    print("-"*52)
-    for var in [did_var]+controls:
-        cy, cm = res_y.params.get(var,np.nan), res_m.params.get(var,np.nan)
-        sy, sm_ = res_y.std_errors.get(var,np.nan), res_m.std_errors.get(var,np.nan)
-        print(f"{var:22} {cy:>14.4f} {cm:>14.4f}")
-        print(f"{'':22} {'('+f'{sy:.4f}'+')':>14} {'('+f'{sm_:.4f}'+')':>14}")
-    print(f"{'N':22} {int(res_y.nobs):>14} {int(res_m.nobs):>14}")
-    print("解读：DID 系数在两列均显著 → M 为传导渠道。")
-    return {'res_y': res_y, 'res_m': res_m}
-```
-
-```r
-# ============================================================
-# 两步法 — R（fixest，推荐）
-# ============================================================
-library(fixest)
-
-two_step_r <- function(df, outcome, mediator, did_var, controls=NULL,
-                        unit_id="unit_id", time="time") {
-  ctrl_str <- if (length(controls)>0) paste("+",paste(controls,collapse="+")) else ""
-  clust    <- as.formula(paste0("~",unit_id))
-  res_y <- feols(as.formula(sprintf("%s ~ %s %s | %s + %s",
-                                     outcome,  did_var, ctrl_str, unit_id, time)),
-                 data=df, cluster=clust)
-  res_m <- feols(as.formula(sprintf("%s ~ %s %s | %s + %s",
-                                     mediator, did_var, ctrl_str, unit_id, time)),
-                 data=df, cluster=clust)
-  etable(res_y, res_m,
-         headers=c("Y（结果变量）","M（机制变量）"), keep=did_var,
-         title="机制分析：两步法",
-         notes="两列 DID 系数均显著支持 M 为 X→Y 传导渠道。双向 FE；聚类至个体。")
-  return(list(res_y=res_y, res_m=res_m))
-}
-```
-
-### 3.2 完整三步法
-
-逻辑：Baron & Kenny (1986)：(1) Y~X，(2) M~X，(3) Y~X+M。关注 X 系数在加入 M 后的变化幅度（部分/完全中介）。
-
-**审稿人可能质疑：** Step3 中 M 属潜在坏控制变量（M 受 X 影响），解释需谨慎。
-
-```r
-# ============================================================
-# 完整三步法 — R（fixest）
-# ============================================================
-three_step_r <- function(df, outcome, mediator, did_var, controls=NULL,
-                          unit_id="unit_id", time="time") {
-  ctrl_str <- if (length(controls)>0) paste("+",paste(controls,collapse="+")) else ""
-  clust    <- as.formula(paste0("~",unit_id))
-  res_s1 <- feols(as.formula(sprintf("%s ~ %s %s | %s + %s",
-                                      outcome, did_var, ctrl_str, unit_id, time)),
-                  data=df, cluster=clust)
-  res_s2 <- feols(as.formula(sprintf("%s ~ %s %s | %s + %s",
-                                      mediator, did_var, ctrl_str, unit_id, time)),
-                  data=df, cluster=clust)
-  res_s3 <- feols(as.formula(sprintf("%s ~ %s + %s %s | %s + %s",
-                                      outcome, did_var, mediator, ctrl_str, unit_id, time)),
-                  data=df, cluster=clust)
-  pct <- (coef(res_s1)[did_var]-coef(res_s3)[did_var])/coef(res_s1)[did_var]*100
-  etable(res_s1, res_s2, res_s3,
-         headers=c("Step1: Y~X","Step2: M~X","Step3: Y~X+M"),
-         keep=c(did_var, mediator),
-         title="机制分析：完整三步法（Baron & Kenny）",
-         notes=paste0(sprintf("Step3 X系数变化：%.1f%%。",pct),
-                      "变化>20%且M显著→部分中介。",
-                      "\n[警告] Step3中M属潜在坏控制变量，解释需谨慎。"))
-  return(list(s1=res_s1, s2=res_s2, s3=res_s3, pct_change=pct))
-}
-```
-
-```python
-# 完整三步法 — Python
-def three_step_mechanism(df, outcome, mediator, did_var, controls=None,
-                          unit_id='unit_id', time='time'):
-    controls = controls or []
-    df_panel = df.set_index([unit_id, time])
-    def fit(dep, regs):
-        X = sm.add_constant(df_panel[regs])
-        return PanelOLS(df_panel[dep], X, entity_effects=True,
-                        time_effects=True).fit(cov_type='clustered', cluster_entity=True)
-    res_s1 = fit(outcome,  [did_var]+controls)
-    res_s2 = fit(mediator, [did_var]+controls)
-    res_s3 = fit(outcome,  [did_var, mediator]+controls)
-    pct = (res_s1.params[did_var]-res_s3.params[did_var])/res_s1.params[did_var]*100
-    print(f"X系数变化：{pct:.1f}%  [警告] Step3 中 M 属潜在坏控制变量。")
-    return {'s1':res_s1,'s2':res_s2,'s3':res_s3,'pct_change':pct}
-```
-
-### 3.3 分组回归
-
-逻辑：按 M 中位数分为高 / 低组，分别跑主回归。高组效应更强说明 M 是传导渠道。组间差异用 Fisher 置换检验（单位级别打乱）。
-
-**补充：三分位 / 四分位分组 + 多切割点敏感性分析图。**
-
-```r
-# ============================================================
-# 分组回归 + Fisher 置换检验 — R（完整版）
-# ============================================================
-library(fixest); library(dplyr); library(ggplot2)
-
-subgroup_mechanism_r <- function(df, outcome, mediator, did_var, controls=NULL,
-                                  unit_id="unit_id", time="time",
-                                  n_quantiles=2, n_perm=1000, seed=42) {
-  set.seed(seed)
-  ctrl_str <- if (length(controls)>0) paste("+",paste(controls,collapse="+")) else ""
-  clust    <- as.formula(paste0("~",unit_id))
-  df       <- df %>% mutate(m_group=ntile(.data[[mediator]], n_quantiles))
-  fml      <- as.formula(sprintf("%s ~ %s %s | %s + %s",
-                                  outcome, did_var, ctrl_str, unit_id, time))
-
-  # 分组回归
-  res_df <- bind_rows(lapply(1:n_quantiles, function(g) {
-    res <- tryCatch(feols(fml, data=df[df$m_group==g,], cluster=clust),
-                    error=function(e) NULL)
-    if (!is.null(res)) data.frame(group=g, coef=coef(res)[did_var],
-                                   se=se(res)[did_var], pval=pvalue(res)[did_var],
-                                   ci_lo=coef(res)[did_var]-1.96*se(res)[did_var],
-                                   ci_hi=coef(res)[did_var]+1.96*se(res)[did_var])
-  }))
-  print(res_df)
-  diff_obs <- max(res_df$coef) - min(res_df$coef)
-
-  # Fisher 置换（单位级别）
-  ug <- df %>% distinct(.data[[unit_id]], m_group)
-  fake_diffs <- sapply(seq_len(n_perm), function(i) {
-    shuf <- ug %>% mutate(m_group=sample(m_group))
-    df_p <- df %>% select(-.data$m_group) %>%
-      left_join(shuf %>% rename(m_group=m_group), by=unit_id)
-    gc <- sapply(1:n_quantiles, function(g) {
-      rf <- tryCatch(feols(fml,data=df_p[df_p$m_group==g,],cluster=clust),
-                     error=function(e) NULL)
-      if (!is.null(rf)) coef(rf)[did_var] else NA_real_
-    })
-    if (all(!is.na(gc))) max(gc)-min(gc) else NA_real_
-  })
-  fake_diffs <- na.omit(fake_diffs)
-  pval_perm  <- mean(abs(fake_diffs) >= abs(diff_obs))
-  cat(sprintf("Fisher 置换 p 值：%.4f（%d 次）\n", pval_perm, length(fake_diffs)))
-
-  # 系数图
-  labels <- switch(as.character(n_quantiles),
-                   "2"=c("低 M 组","高 M 组"), "3"=c("低 M","中 M","高 M"),
-                   paste0("Q", 1:n_quantiles))
-  res_df$label <- labels[res_df$group]
-  p <- ggplot(res_df, aes(x=label, y=coef, ymin=ci_lo, ymax=ci_hi)) +
-    geom_col(fill="#20808D", alpha=0.7, width=0.5) +
-    geom_errorbar(width=0.2, color="#1B474D", lw=1) +
-    geom_hline(yintercept=0, lty="dashed", color="gray50") +
-    labs(x=sprintf("M 分组（%d分位）",n_quantiles), y="处理效应系数",
-         title="分组回归：M 分组的处理效应",
-         caption=sprintf("Fisher p=%.4f（%d次）",pval_perm,length(fake_diffs))) +
-    theme_minimal(base_size=12)
-  ggsave("output/mechanism_subgroup.png", p, width=7, height=4, dpi=150)
-  return(list(results=res_df, pval_perm=pval_perm))
-}
-```
-
-```python
-# 分组回归 + Fisher 置换 — Python
-def subgroup_mechanism(df, outcome, mediator, did_var, controls=None,
-                        unit_id='unit_id', time='time',
-                        n_quantiles=2, n_perm=1000, seed=42):
-    np.random.seed(seed)
-    controls = controls or []
-    df = df.copy()
-    df['m_group'] = pd.qcut(df[mediator], q=n_quantiles, labels=False)
-    def fit_g(data_g):
-        dp = data_g.set_index([unit_id, time])
-        try:
-            return PanelOLS(dp[outcome],
-                            sm.add_constant(dp[[did_var]+controls]),
-                            entity_effects=True, time_effects=True
-                           ).fit(cov_type='clustered', cluster_entity=True)
-        except: return None
-    group_res = {}
-    for g in range(n_quantiles):
-        res = fit_g(df[df['m_group']==g])
-        if res: group_res[g] = {'coef':res.params[did_var],'pval':res.pvalues[did_var]}
-        print(f"组{g}: {group_res.get(g,{})}")
-    diff_obs = max(r['coef'] for r in group_res.values()) - \
-               min(r['coef'] for r in group_res.values())
-    units = df[unit_id].unique()
-    gmap  = df.drop_duplicates(unit_id).set_index(unit_id)['m_group']
-    fake_diffs = []
-    for _ in range(n_perm):
-        perm = np.random.permutation(gmap.values)
-        df['fg'] = df[unit_id].map(dict(zip(gmap.index, perm)))
-        gc = [fit_g(df[df['fg']==g]) for g in range(n_quantiles)]
-        gc = [r.params[did_var] for r in gc if r]
-        if len(gc)==n_quantiles: fake_diffs.append(max(gc)-min(gc))
-    p_val = np.mean(np.abs(fake_diffs) >= np.abs(diff_obs))
-    print(f"Fisher p={p_val:.4f}（{len(fake_diffs)}次）")
-    return {'group_results':group_res,'p_value':p_val}
-```
-
-### 3.4 交互项法
-
-逻辑：在主回归中加入 X×M 交互项，系数 β₃ 代表 M 对 X→Y 效应的调节强度。绘制边际效应图。
-
-**适用：** M 是调节变量（M 不被 X 影响）。
-
-```r
-# ============================================================
-# 交互项法 + 边际效应图 — R（fixest + marginaleffects）
-# ============================================================
-library(fixest); library(marginaleffects); library(ggplot2); library(dplyr)
-
-interaction_mechanism_r <- function(df, outcome, moderator, did_var, controls=NULL,
-                                     unit_id="unit_id", time="time") {
-  df      <- df %>% mutate(M_c=as.numeric(scale(.data[[moderator]], center=TRUE, scale=FALSE)))
-  ctrl_str <- if (length(controls)>0) paste("+",paste(controls,collapse="+")) else ""
-  res_int <- feols(as.formula(sprintf("%s ~ %s * M_c %s | %s + %s",
-                                       outcome, did_var, ctrl_str, unit_id, time)),
-                   data=df, cluster=as.formula(paste0("~",unit_id)))
-  etable(res_int, keep=c(did_var,"M_c",paste0(did_var,":M_c")),
-         title="调节效应：X × M 交互项",
-         notes="M 已中心化；交互项系数>0=正向调节。")
-
-  M_rng <- seq(quantile(df$M_c,.05,na.rm=TRUE), quantile(df$M_c,.95,na.rm=TRUE), l=50)
-  me_df <- marginaleffects::slopes(res_int, variables=did_var,
-                                    newdata=datagrid(M_c=M_rng))
-  p <- ggplot(me_df, aes(x=M_c, y=estimate)) +
-    geom_ribbon(aes(ymin=conf.low, ymax=conf.high), alpha=0.2, fill="#20808D") +
-    geom_line(color="#20808D", lw=1.3) +
-    geom_hline(yintercept=0, lty="dashed", color="gray50") +
-    labs(x=sprintf("%s（中心化）",moderator), y="处理效应（边际效应）",
-         title="交互项法：处理效应随 M 变化") +
-    theme_minimal(base_size=12)
-  ggsave("output/mechanism_marginal.png", p, width=8, height=5, dpi=150)
-  return(list(result=res_int, plot=p))
-}
-```
-
-```python
-# 交互项法 — Python（within demean + delta method SE）
-def interaction_mechanism_python(df, outcome, moderator, did_var, controls=None,
-                                   unit_id='unit_id', time='time'):
-    controls = controls or []
-    df = df.copy()
-    df['M_c'] = df[moderator] - df[moderator].mean()
-    df[f'{did_var}_x_M'] = df[did_var] * df['M_c']
-    for col in [outcome, did_var, 'M_c', f'{did_var}_x_M']+controls:
-        df[col+'_dm'] = df[col] - df.groupby(unit_id)[col].transform('mean')
-    regs = [f'{did_var}_dm','M_c_dm',f'{did_var}_x_M_dm']+[c+'_dm' for c in controls]
-    mod = sm.OLS(df[f'{outcome}_dm'], sm.add_constant(df[regs])).fit(
-        cov_type='cluster', cov_kwds={'groups':df[unit_id]})
-    int_coef = mod.params[f'{did_var}_x_M_dm']
-    print(f"交互项系数：{int_coef:.4f}（>0 = 正向调节）")
-    return {'result': mod}
-```
-
-### 3.5 因果中介效应
-
-适用于 M 存在内生性时。**必须做 `medsens()` 敏感性分析，报告 ρ 临界值。**
-
-```r
-# ============================================================
-# 因果中介效应 — R（mediation 包）
-# medsens() 为必做步骤！
-# ============================================================
-library(mediation); library(dplyr)
-
-causal_mediation_r <- function(df, outcome, mediator, treatment, controls=NULL,
-                                unit_id="unit_id", n_sims=1000, seed=42) {
-  """
-  声明：Sequential Ignorability 假设（类似中介随机化），必须在论文中讨论合理性。
-  """
-  set.seed(seed)
-  controls <- controls %||% character(0)
-  # 面板 Within 去均值（模拟 FE）
-  df_dm <- df %>% group_by(.data[[unit_id]]) %>%
-    mutate(across(all_of(c(outcome,mediator,treatment,controls)),
-                  ~.-mean(.,na.rm=TRUE))) %>% ungroup()
-  ctrl_str <- if (length(controls)>0) paste("+",paste(controls,collapse="+")) else ""
-  med_fit <- lm(as.formula(sprintf("%s ~ %s %s",mediator,treatment,ctrl_str)), data=df_dm)
-  out_fit <- lm(as.formula(sprintf("%s ~ %s + %s %s",outcome,treatment,mediator,ctrl_str)), data=df_dm)
-
-  med_out <- mediate(model.m=med_fit, model.y=out_fit, treat=treatment,
-                     mediator=mediator, sims=n_sims, boot=TRUE, boot.ci.type="perc")
-  summary(med_out)  # ACME / ADE / Total / Prop.Mediated
-
-  # ── 必做：medsens() 敏感性分析 ──────────────────────────
-  sens_out <- medsens(med_out, rho.by=0.05, effect.type="indirect", sims=200)
-  rho_crit <- sens_out$rho[which.min(abs(sens_out$d0))]
-  cat(sprintf("[敏感性] ρ 临界值=%.2f。|ρ|<0.1时结论对假设偏离非常敏感，需在论文中说明。\n",
-              rho_crit))
-
-  return(list(med_out=med_out, sens_out=sens_out, rho_crit=rho_crit))
-}
-```
-
-```python
-# ============================================================
-# 因果中介效应 — Python（Cluster Bootstrap，按 unit_id 重抽）
-# 注意：Bootstrap 必须在 unit_id 层面重抽，不是观测级别！
-# ============================================================
-def causal_mediation_python(df, outcome, mediator, treatment, controls=None,
-                              unit_id='unit_id', n_boot=1000, seed=42):
-    """
-    Sequential Ignorability 假设，需在论文中讨论合理性。
-    Returns: dict{ACME, ADE, Total_Effect, Prop_Mediated} 含 95% CI
-    """
-    np.random.seed(seed)
-    controls = controls or []
-    def fit_med(data):
-        Xm = sm.add_constant(data[[treatment]+controls])
-        mm = sm.OLS(data[mediator], Xm).fit()
-        Xy = sm.add_constant(data[[treatment, mediator]+controls])
-        my = sm.OLS(data[outcome], Xy).fit()
-        a  = mm.params[treatment]; b = my.params[mediator]; g = my.params[treatment]
-        acme = a*b; ade = g; tot = acme+ade
-        return acme, ade, tot, (acme/tot if abs(tot)>1e-10 else np.nan)
-
-    obs = fit_med(df)
-    units = df[unit_id].unique()
-    boot_res = []
-    for _ in range(n_boot):
-        # Cluster Bootstrap：按 unit_id 有放回抽样
-        su = np.random.choice(units, size=len(units), replace=True)
-        bd = pd.concat([df[df[unit_id]==u] for u in su], ignore_index=True)
-        try: boot_res.append(fit_med(bd))
-        except: pass
-    boot = np.array(boot_res)
-    ci_lo, ci_hi = np.nanpercentile(boot, 2.5, axis=0), np.nanpercentile(boot, 97.5, axis=0)
-    for i, k in enumerate(['ACME','ADE','Total_Effect','Prop_Mediated']):
-        print(f"{k:18}: {obs[i]:>8.4f}  95%CI=[{ci_lo[i]:.4f}, {ci_hi[i]:.4f}]")
-    print("[声明] Sequential Ignorability 假设需在论文中讨论。Cluster Bootstrap 按 unit_id 重抽。")
-    return {k: (obs[i], ci_lo[i], ci_hi[i])
-            for i, k in enumerate(['ACME','ADE','Total_Effect','Prop_Mediated'])}
-```
-
----
-
-## 4. 残差法（Bleemer-Mehta 风格）
-
-**标注：经济学顶刊前沿（Bleemer & Mehta 2022, AER），管理学期刊接受度有限。**
-
-```r
-# ============================================================
-# 残差法 — R（含 Cluster Bootstrap SE）
-# ============================================================
-library(fixest); library(dplyr)
-
-residual_mechanism_r <- function(df, outcome, mediator, did_var, controls=NULL,
-                                  unit_id="unit_id", time="time",
-                                  n_boot=500, seed=42) {
-  set.seed(seed)
-  ctrl_str <- if (length(controls)>0) paste("+",paste(controls,collapse="+")) else ""
-  clust    <- as.formula(paste0("~",unit_id))
-
-  res_total <- feols(as.formula(sprintf("%s ~ %s %s | %s+%s",
-                                         outcome,did_var,ctrl_str,unit_id,time)),
-                     data=df, cluster=clust)
-  beta_total <- coef(res_total)[did_var]
-
-  # 用控制组（post=0 | treated=0）估计 M→Y，取残差
-  df_pre <- df %>% filter(post==0 | treated==0)
-  res_m_y <- feols(as.formula(sprintf("%s ~ %s %s | %s+%s",
-                                       outcome,mediator,ctrl_str,unit_id,time)),
-                   data=df_pre)
-  df$resid_ym <- df[[outcome]] - predict(res_m_y, newdata=df)
-  res_dir <- feols(as.formula(sprintf("resid_ym ~ %s %s | %s+%s",
-                                       did_var,ctrl_str,unit_id,time)),
-                   data=df, cluster=clust)
-  beta_dir   <- coef(res_dir)[did_var]
-  beta_indir <- beta_total - beta_dir
-  cat(sprintf("总效应：%.4f  直接：%.4f(%.1f%%)  间接：%.4f(%.1f%%)\n",
-              beta_total, beta_dir, beta_dir/beta_total*100,
-              beta_indir, beta_indir/beta_total*100))
-
-  # Cluster Bootstrap SE
-  units <- unique(df[[unit_id]])
-  boot_i <- sapply(seq_len(n_boot), function(b) {
-    bu <- sample(units, replace=TRUE)
-    df_b <- do.call(rbind, lapply(bu, function(u) df[df[[unit_id]]==u,]))
-    rt <- tryCatch(feols(as.formula(sprintf("%s~%s|%s+%s",
-                                            outcome,did_var,unit_id,time)),data=df_b),error=function(e)NULL)
-    df_pre_b <- df_b %>% filter(post==0|treated==0)
-    rmy <- tryCatch(feols(as.formula(sprintf("%s~%s|%s+%s",
-                                             outcome,mediator,unit_id,time)),data=df_pre_b),error=function(e)NULL)
-    if (!is.null(rt)&&!is.null(rmy)){
-      df_b$resid_b <- df_b[[outcome]]-predict(rmy,newdata=df_b)
-      rd <- tryCatch(feols(resid_b~get(did_var)|unit_id+time,data=df_b),error=function(e)NULL)
-      if (!is.null(rd)) coef(rt)[did_var]-coef(rd)[did_var] else NA_real_
-    } else NA_real_
-  })
-  boot_i <- na.omit(boot_i)
-  cat(sprintf("间接效应 SE(Bootstrap)：%.4f  95%%CI：[%.4f, %.4f]\n",
-              sd(boot_i), quantile(boot_i,.025), quantile(boot_i,.975)))
-  cat("[标注] 残差法属经济学顶刊前沿方法（Bleemer & Mehta 2022, AER），管理学接受度有限。\n")
-  return(list(beta_total=beta_total, beta_indirect=beta_indir,
-              se_indirect=sd(boot_i)))
-}
-```
-
----
-
-## 5. 多中介变量竞争性检验
-
-分别跑 M1 ~ X, M2 ~ X, M3 ~ X 并排比较，验证哪条机制路径更强。
-
-```r
-# ============================================================
-# 多中介竞争性检验 — R
-# ============================================================
-competitive_mediators_r <- function(df, outcome, mediators, did_var,
-                                     controls=NULL, unit_id="unit_id", time="time") {
-  # mediators: named list，例 list(融资约束='sa_index', 信息不对称='bid_ask')
-  ctrl_str <- if (length(controls)>0) paste("+",paste(controls,collapse="+")) else ""
-  clust    <- as.formula(paste0("~",unit_id))
-  res_y <- feols(as.formula(sprintf("%s~%s%s|%s+%s",outcome,did_var,ctrl_str,unit_id,time)),
-                 data=df, cluster=clust)
-  res_list  <- list(Y=res_y)
-  hdr_names <- c("Y（结果变量）")
-  for (nm in names(mediators)) {
-    res_list[[nm]] <- feols(as.formula(sprintf("%s~%s%s|%s+%s",
-                                                mediators[[nm]],did_var,ctrl_str,unit_id,time)),
-                            data=df, cluster=clust)
-    hdr_names <- c(hdr_names, nm)
-  }
-  do.call(etable, c(res_list, list(headers=hdr_names, keep=did_var,
-                                    title="多中介变量竞争性检验",
-                                    notes="DID 系数显著的中介变量为优先支持的机制路径。")))
-  return(res_list)
-}
-```
-
----
-
-## 6. 坏控制变量警告
-
-```python
-# ============================================================
-# 坏控制变量检查 — Python（函数参数传入，不用 input()）
-# ============================================================
-def check_bad_control(M_name, X_name, Y_name,
-                       M_affected_by_X=None,
-                       M_before_X=None,
-                       Y_affects_M=None):
-    """
-    Parameters
-    ----------
-    M_affected_by_X : bool，M 是否受 X 影响
-    M_before_X      : bool，M 是否在 X 处理前就已确定
-    Y_affects_M     : bool，Y 是否反向影响 M（对撞变量判断）
-
-    Returns: str（角色：'mediator'/'moderator'/'collider'/'predetermined'/'unclear'）
-    """
-    if Y_affects_M is True:
-        print(f"[拒绝执行] {M_name} 是对撞变量：{X_name}→{M_name}←{Y_name}")
-        print("加入回归将引入虚假关联。请重新检查 DAG，修改假设。")
-        return 'collider'
-    if M_before_X is True:
-        print(f"[警告] {M_name} 在处理前已确定 → 前定变量（非中介）。推荐用交互项法。")
-        return 'predetermined'
-    if M_affected_by_X is False:
-        print(f"[信息] {M_name} 不受 {X_name} 影响 → 调节变量。推荐交互项法。")
-        return 'moderator'
-    if M_affected_by_X is True and M_before_X is False:
-        print(f"[通过] {M_name} 符合中介变量条件。推荐两步法或因果中介效应。")
-        return 'mediator'
-    print("[不确定] 回到 DAG 重新梳理因果关系。")
-    return 'unclear'
-
-# 调用示例：
-# role = check_bad_control("融资约束指数","政策处理","企业投资",
-#                           M_affected_by_X=True, M_before_X=False, Y_affects_M=False)
-```
-
----
-
-## 7. 机制变量平行趋势
-
-若主回归使用 DID，机制变量 M 也需满足平行趋势假设，否则 X→M 的证据本身存在内生性问题。
-
-```r
-# ============================================================
-# 机制变量事件研究图（与主回归并排）— R
-# ============================================================
-library(fixest); library(ggplot2); library(dplyr)
-
-mechanism_parallel_trend_r <- function(df, outcome, mediator,
-                                        unit_id="unit_id", time="time",
-                                        treatment="treated", ref_period=-1) {
-  clust <- as.formula(paste0("~",unit_id))
-  es_fml <- function(dep)
-    as.formula(sprintf("%s ~ i(event_time,%s,ref=%d) | %s + %s",
-                        dep, treatment, ref_period, unit_id, time))
-
-  res_y_es <- feols(es_fml(outcome),  data=df, cluster=clust)
-  res_m_es <- feols(es_fml(mediator), data=df, cluster=clust)
-
-  extract_es <- function(res, label) {
-    cf <- coef(res); ci <- confint(res)
-    idx <- grep("event_time", names(cf))
-    tt  <- as.numeric(gsub(".*::(\\-?[0-9]+).*","\\1",names(cf)[idx]))
-    rbind(data.frame(event_time=c(tt,ref_period),
-                     coef=c(cf[idx],0), ci_lo=c(ci[idx,1],0), ci_hi=c(ci[idx,2],0),
-                     variable=label))
-  }
-
-  df_es <- rbind(extract_es(res_y_es,"Y（结果变量）"),
-                 extract_es(res_m_es,"M（机制变量）"))
-
-  p <- ggplot(df_es, aes(x=event_time, y=coef, color=variable, fill=variable)) +
-    geom_hline(yintercept=0, lty="dashed", color="gray50") +
-    geom_ribbon(aes(ymin=ci_lo, ymax=ci_hi), alpha=0.15, color=NA) +
-    geom_line(lw=1.1) + geom_point(size=2) +
-    facet_wrap(~variable, scales="free_y") +
-    scale_color_manual(values=c("Y（结果变量）"="#20808D","M（机制变量）"="#A84B2F")) +
-    scale_fill_manual(values =c("Y（结果变量）"="#20808D","M（机制变量）"="#A84B2F")) +
-    labs(x="相对处理期（ref=-1）", y="系数（ATT）",
-         title="主回归（Y）与机制变量（M）事件研究对比",
-         caption="M 在处理前平行趋势成立 → 支持 X→M 的因果解释") +
-    theme_minimal(base_size=12) + theme(legend.position="none")
-  ggsave("output/mechanism_event_study.png", p, width=10, height=5, dpi=150)
-
-  # M 的 Pre-period 联合检验
-  pre_m <- grep("event_time::-[2-9]", names(coef(res_m_es)), value=TRUE)
-  if (length(pre_m)>0) {
-    wt <- wald(res_m_es, keep=pre_m)
-    cat(sprintf("M Pre-period 联合 F=%.3f, p=%.4f  通过(p>0.10): %s\n",
-                wt$stat, wt$p, wt$p>0.10))
-  }
-  return(list(res_y=res_y_es, res_m=res_m_es, plot=p))
-}
-```
+## M 的角色 → 方法选择 → 控制策略
+
+| M 的 DAG 角色 | 典型结构 | 推荐方法 | 控制策略 |
+|---|---|---|---|
+| **中介变量** | `D → M → Y` | 默认用**两步法**；如需量化见 `ADVANCED.md` | 不要在“总效应回归”里把 `M` 当普通控制变量 |
+| **混淆因子** | `M → D` 且 `M → Y` | 主回归必须控制 | **好控制**，应纳入 |
+| **对撞变量** | `D → M ← Y` | 不应做机制变量 | **绝对不要控制** |
+| **前定变量** | `M` 在处理前已确定 | 可做控制变量或异质性分组 | 通常可控制，但它不是中介 |
+| **调节变量** | `D × M → Y` | 交互项法 / 分组回归 | 仅在 `M` 不被 `D` 影响时使用 |
 
 ---
 
 ## 方法对照表
 
-| 方法 | 适用场景 | 优势 | 局限 | 适用期刊范围 |
-|------|----------|------|------|-------------|
-| **两步法** | 只需证明 X→M 存在 | 无坏控制变量问题；直觉强 | 无法量化间接效应占比 | 经济学顶刊（AER/QJE/JFE）|
-| **完整三步法** | 兼容传统审稿人 | 展示中介系数变化幅度 | Step3 M 是坏控制变量 | 管理学（AMJ/SMJ）|
-| **分组回归** | M 可二值化（高/低）| 无函数形式假设 | 分组切割点主观 | 各类实证期刊 |
-| **交互项法** | M 是调节变量（不受 X 影响）| 正式估计调节效应 | 需要 M 外生 | 顶刊 + 管理学 |
-| **因果中介** | M 内生，需 Sequential Ignorability | 正式分解 IE/DE + 敏感性 | 假设强，需 medsens() | 方法论期刊 / 顶刊附录 |
-| **残差法** | 量化间接效应比例 | 不引入坏控制变量 | 审稿人不熟悉 | 经济学顶刊前沿 |
+| 方法 | 推荐程度 | 能回答什么 | 主要局限 | 适用期刊/场景 |
+|---|---|---|---|---|
+| **两步法** | **默认推荐** | `D` 是否影响机制变量 `M` | 不直接量化“中介占比” | 经济学顶刊、中文经管顶刊 |
+| **完整三步法** | 兼容型 | 展示加入 `M` 后 `D` 系数如何变化 | **`M` 的系数可能有偏；中介百分比通常无明确因果含义** | 管理学常见，经济学慎用 |
+| **三步法变体（Step3 仅 M）** | 补充型 | 规避 `D` 与 `M` 共线性 | 无法判断部分/完全中介，`M` 仍可能内生 | 中文实证论文常见补充 |
+| **分组回归** | 条件推荐 | 某类前定环境是否强化/削弱主效应 | 更像异质性，不等于中介 | 调节效应、环境条件 |
+| **交互项法** | 条件推荐 | `M` 是否调节 `D → Y` 的强度 | 若 `M` 受 `D` 影响则解释失效 | 调节效应分析 |
+
+---
+
+## 前置：DAG 自检
+
+在开始之前，先回答四个问题：
+
+1. `M` 是否发生在 `D` 之后、`Y` 之前？
+2. `M` 会不会同时受到 `Y` 的反向影响？
+3. `M` 是否本质上是处理前就确定的前定变量？
+4. `M` 是否可能是 `D` 和 `Y` 的共同结果（collider）？
+
+如果第 4 个问题答案是“是”，则应停止把 `M` 当机制变量处理。
+
+---
+
+## 方法 1：两步法（默认推荐）
+
+> **为什么两步法是充分的？**
+>
+> 两步法的逻辑基础是：
+> - 基准回归已经识别了 `D → Y` 的因果效应；
+> - 机制回归识别了 `D → M` 的因果效应；
+> - `M → Y` 的关系由经济理论、制度背景和既有文献支撑。
+>
+> 这三部分合在一起，就构成了完整的 `D → M → Y` 机制论证。
+> 不需要在同一个 OLS 回归里“验证” `M → Y`，因为 `M` 往往不是随机分配的。
+
+### 适用场景
+- 你的核心目标是“说明机制是否存在”，而不是精确分解中介比例
+- `M → Y` 的逻辑已经有扎实的理论和既有文献支持
+- 你希望主结论尽量避免坏控制问题
+
+### 标准流程
+
+```text
+Step 1: 基准回归确认 D → Y
+Step 2: 机制回归检验 D → M
+Step 3: 结合经济理论与既有文献，论证 M → Y
+```
+
+### R 代码模板（适用于面板 / DID）
+
+```r
+library(fixest)
+
+mechanism_two_step_r <- function(df, outcome, mediator, did_var,
+                                 controls = NULL,
+                                 unit_id = "unit_id",
+                                 time = "time") {
+  ctrl_str <- if (!is.null(controls) && length(controls) > 0) {
+    paste("+", paste(controls, collapse = "+"))
+  } else ""
+  clust <- as.formula(paste0("~", unit_id))
+
+  # Step 1: Y ~ D
+  f1 <- as.formula(sprintf("%s ~ %s %s | %s + %s",
+                           outcome, did_var, ctrl_str, unit_id, time))
+  res_y <- feols(f1, data = df, cluster = clust)
+
+  # Step 2: M ~ D
+  f2 <- as.formula(sprintf("%s ~ %s %s | %s + %s",
+                           mediator, did_var, ctrl_str, unit_id, time))
+  res_m <- feols(f2, data = df, cluster = clust)
+
+  etable(res_y, res_m,
+         headers = c("Baseline: Y~D", "Mechanism: M~D"),
+         keep = did_var,
+         title = "机制分析：两步法")
+
+  list(step1 = res_y, step2 = res_m)
+}
+```
+
+### 结果解读模板
+
+```text
+基准回归显示，处理变量 D 显著影响了结果变量 Y。
+机制回归进一步表明，D 对候选机制变量 M 的影响显著。
+结合既有理论与文献中关于 M 影响 Y 的充分证据，结果支持“D 通过 M 影响 Y”的机制解释。
+```
+
+---
+
+## 方法 2：完整三步法（兼容传统审稿人）
+
+> **⚠️ 方法论缺陷警告（非审稿偏好问题）**
+>
+> Step3 将 `M` 加入结果方程存在两个根本性问题：
+>
+> 1. **坏控制变量问题**：若 `M` 受 `D` 影响，则把 `M` 放入回归会阻断间接路径，
+>    此时 `D` 的系数不再是总效应；
+> 2. **`M` 的内生性问题**：即使 `D` 是外生的，`M` 往往仍不是随机分配的；
+>    若存在同时影响 `M` 和 `Y` 的遗漏变量，则 `M` 的系数和“中介占比”都会有偏。
+>
+> **结论**：完整三步法可以跑，但应在论文中明确定位为**描述性补充证据**，
+> 主结论仍应依赖两步法或更强识别方法。
+
+### 标准流程
+
+```text
+Step 1: Y ~ D
+Step 2: M ~ D
+Step 3: Y ~ D + M
+```
+
+### R 代码模板
+
+```r
+library(fixest)
+
+mechanism_three_step_r <- function(df, outcome, mediator, did_var,
+                                   controls = NULL,
+                                   unit_id = "unit_id",
+                                   time = "time") {
+  ctrl_str <- if (!is.null(controls) && length(controls) > 0) {
+    paste("+", paste(controls, collapse = "+"))
+  } else ""
+  clust <- as.formula(paste0("~", unit_id))
+
+  f1 <- as.formula(sprintf("%s ~ %s %s | %s + %s",
+                           outcome, did_var, ctrl_str, unit_id, time))
+  f2 <- as.formula(sprintf("%s ~ %s %s | %s + %s",
+                           mediator, did_var, ctrl_str, unit_id, time))
+  f3 <- as.formula(sprintf("%s ~ %s + %s %s | %s + %s",
+                           outcome, did_var, mediator, ctrl_str, unit_id, time))
+
+  res_s1 <- feols(f1, data = df, cluster = clust)
+  res_s2 <- feols(f2, data = df, cluster = clust)
+  res_s3 <- feols(f3, data = df, cluster = clust)
+
+  etable(res_s1, res_s2, res_s3,
+         headers = c("Step1: Y~D", "Step2: M~D", "Step3: Y~D+M"),
+         keep = c(did_var, mediator),
+         title = "机制分析：完整三步法",
+         notes = "Step3 仅作描述性补充，不应将系数变化直接解释为因果中介效应。")
+
+  list(step1 = res_s1, step2 = res_s2, step3 = res_s3)
+}
+```
+
+### 使用口径
+
+```text
+若审稿人要求报告传统中介效应逐步法，本文将其作为补充分析提供。
+考虑到机制变量 M 可能存在坏控制和内生性问题，三步法结果仅作描述性证据，
+主结论仍依赖两步法和理论论证。
+```
+
+---
+
+## 方法 3：三步法变体（Step3 只放 M）
+
+> **定位：** 这是一个“缓解共线性”的兼容型变体，不是识别升级。
+>
+> 三步法变体规避了 `D` 与 `M` 的共线性问题，但 **`M` 的内生性问题依然存在**。
+> 如果存在同时影响 `M` 和 `Y` 的遗漏变量，Step3 变体中 `M` 的系数同样不是因果效应。
+>
+> 同时，因为 Step3 不再放 `D`，该方法**无法判断部分中介 vs 完全中介**。
+
+### R 代码模板
+
+```r
+three_step_variant_r <- function(df, outcome, mediator, did_var,
+                                 controls = NULL,
+                                 unit_id = "unit_id", time = "time") {
+  library(fixest)
+
+  ctrl_str <- if (!is.null(controls) && length(controls) > 0) {
+    paste("+", paste(controls, collapse = "+"))
+  } else ""
+  clust <- as.formula(paste0("~", unit_id))
+
+  # Step1: Y ~ D
+  res_s1 <- feols(as.formula(sprintf("%s ~ %s %s | %s + %s",
+                                     outcome, did_var, ctrl_str, unit_id, time)),
+                  data = df, cluster = clust)
+
+  # Step2: M ~ D
+  res_s2 <- feols(as.formula(sprintf("%s ~ %s %s | %s + %s",
+                                     mediator, did_var, ctrl_str, unit_id, time)),
+                  data = df, cluster = clust)
+
+  # Step3 变体: Y ~ M（不放 D）
+  res_s3v <- feols(as.formula(sprintf("%s ~ %s %s | %s + %s",
+                                      outcome, mediator, ctrl_str, unit_id, time)),
+                   data = df, cluster = clust)
+
+  etable(res_s1, res_s2, res_s3v,
+         headers = c("Step1: Y~D", "Step2: M~D", "Step3v: Y~M (无D)"),
+         keep = c(did_var, mediator),
+         title = "机制分析：三步法变体（Step3 仅含 M）",
+         notes = "Step3 不放 D 以缓解共线性；代价是无法区分部分/完全中介，且 M 仍可能内生。")
+}
+```
+
+### 何时可用
+- `D` 与 `M` 高度相关，导致 `Y ~ D + M` 中标准误异常大
+- 审稿人或期刊习惯要求“三步法表格”
+- 你愿意在文中明确承认该方法仅为补充证据
+
+---
+
+## 方法 4：分组回归（更像异质性，不等于中介）
+
+### 适用场景
+- 候选变量 `M` 是处理前就确定的环境条件
+- 你关心“在高/低 `M` 条件下，处理效应是否不同”
+- `M` 更像调节变量，而不是中介变量
+
+### R 代码模板
+
+```r
+library(fixest)
+
+heterogeneity_by_group_r <- function(df, outcome, did_var, group_var,
+                                     controls = NULL,
+                                     unit_id = "unit_id", time = "time") {
+  ctrl_str <- if (!is.null(controls) && length(controls) > 0) {
+    paste("+", paste(controls, collapse = "+"))
+  } else ""
+  clust <- as.formula(paste0("~", unit_id))
+
+  df$group_high <- as.integer(df[[group_var]] >= median(df[[group_var]], na.rm = TRUE))
+
+  res_low <- feols(as.formula(sprintf("%s ~ %s %s | %s + %s",
+                                      outcome, did_var, ctrl_str, unit_id, time)),
+                   data = subset(df, group_high == 0), cluster = clust)
+
+  res_high <- feols(as.formula(sprintf("%s ~ %s %s | %s + %s",
+                                       outcome, did_var, ctrl_str, unit_id, time)),
+                    data = subset(df, group_high == 1), cluster = clust)
+
+  etable(res_low, res_high,
+         headers = c("Low group", "High group"),
+         keep = did_var,
+         title = "分组回归：高低组异质性")
+
+  list(low = res_low, high = res_high)
+}
+```
+
+### 解释提醒
+- 两组系数“看起来不一样”并不够；最好补做组间差异检验。
+- 如果 `M` 本身受 `D` 影响，那么分组回归就不是标准的调节效应设计。
+
+---
+
+## 方法 5：交互项法（仅用于调节变量）
+
+> **关键前提：** 交互项法要求 `M` 是调节变量，而不是中介变量。
+> 如果 `M` 受 `D` 影响，则 `D × M` 的解释会变得混乱。
+
+```r
+library(fixest)
+
+moderation_interaction_r <- function(df, outcome, did_var, moderator,
+                                     controls = NULL,
+                                     unit_id = "unit_id", time = "time") {
+  ctrl_str <- if (!is.null(controls) && length(controls) > 0) {
+    paste("+", paste(controls, collapse = "+"))
+  } else ""
+  clust <- as.formula(paste0("~", unit_id))
+
+  f <- as.formula(sprintf("%s ~ %s * %s %s | %s + %s",
+                          outcome, did_var, moderator, ctrl_str, unit_id, time))
+  res <- feols(f, data = df, cluster = clust)
+  summary(res)
+  res
+}
+```
+
+---
+
+## 坏控制快速检查
+
+```text
+如果你正准备把 M 放进结果方程，请先问：
+1. M 是否受 D 影响？
+   是 → M 可能是中介，放进去会阻断间接路径
+2. M 是否也可能受 Y 或遗漏变量 U 影响？
+   是 → M 还可能内生
+3. M 是否是 D 和 Y 的共同结果？
+   是 → collider，不能控制
+```
+
+---
+
+## 常见误区
+
+> **误区 1：Step3 里 D 的系数变小 = 机制成立**
+>
+> 纠正：不能直接这样解释。把 `M` 放入 Step3 后，`M` 既可能是坏控制，也可能内生；
+> `D` 的系数变化不等于“间接效应”。
+
+> **误区 2：两步法只要 `D → M` 显著就够了**
+>
+> 纠正：还需要经济理论和既有文献支持 `M → Y` 的逻辑成立。
+> 否则，`D` 对 `M` 的影响可能只是一个副产品，不一定是真机制。
+
+> **误区 3：分组回归两组系数大小不同 = 机制成立**
+>
+> 纠正：必须检验组间差异是否统计显著，而不是只看各组是否显著。
+
+> **误区 4：交互项法里的 `M` 可以是中介变量**
+>
+> 纠正：交互项法要求 `M` 是调节变量，即 `M` 不应被 `D` 影响。
+
+> **误区 5：三步法可以可靠报告“中介百分比”**
+>
+> 纠正：在传统三步法中，这个比例通常没有稳定的因果含义。
+> 若必须量化，应转向 `ADVANCED.md` 中的因果中介或 IV-mediation 框架。
+
+---
+
+## 检验清单
+
+| 检验 | 方法 | 通过标准 |
+|------|------|----------|
+| DAG 角色识别 | 判断 `M` 是中介/混淆/对撞/调节 | 不把 collider 误当机制 |
+| 主效应存在 | 基准回归 `Y ~ D` | `D` 对 `Y` 显著或方向稳定 |
+| 机制路径存在 | 机制回归 `M ~ D` | `D` 对 `M` 显著或方向稳定 |
+| 理论支撑 | 文献 + 制度背景 | `M → Y` 逻辑清晰 |
+| 三步法补充 | `Y ~ D + M` | 仅作描述性，不作强因果解释 |
+| 分组差异 | 分组回归 / 交互项 | 最好有组间差异检验 |
+
+---
+
+## 写作模板
+
+### 主文推荐写法（两步法）
+
+```text
+本文采用两步法检验作用机制。首先，基准回归表明处理变量 D 对结果变量 Y 具有显著影响。
+其次，以候选机制变量 M 为被解释变量的回归显示，D 显著影响 M。
+结合关于 M 影响 Y 的理论逻辑与既有文献证据，结果支持 D 通过 M 影响 Y 的机制解释。
+```
+
+### 审稿人要求三步法时的写法
+
+```text
+作为补充，本文进一步报告传统三步法结果。
+需要说明的是，考虑到机制变量 M 可能存在坏控制和内生性问题，
+三步法结果仅作为描述性证据，不作为本文机制识别的主要依据。
+```
+
+---
+
+## Few-Shot：大数据试验区与就业增长
+
+**研究问题：** 大数据试验区设立是否促进城市就业增长？
+
+- 处理变量 `D`：`Bigdata`（是否设立大数据试验区）
+- 结果变量 `Y`：`Labor`（就业增长）
+- 候选机制变量：
+  - `M1 = Newfirm`：新注册企业数量，代表岗位创造效应
+  - `M2 = TFP`：企业全要素生产率，代表市场扩大效应
+  - `M3 = Bank`：银行网点数量，代表融资约束缓解或金融环境
+
+### 方法匹配
+
+- **M1：两步法**
+  - 检验 `Bigdata → Newfirm` 是否显著；
+  - `Newfirm → Labor` 的关系由创业与就业创造文献支撑。
+
+- **M2：完整三步法 / 进阶因果中介**
+  - 若审稿人要求展示“传导强度”，可补充三步法；
+  - 若需要更严格量化，转到 `ADVANCED.md` 使用因果中介。
+
+- **M3：分组回归 / 交互项法**
+  - 若 `Bank` 是处理前金融环境，更适合作为调节变量；
+  - 此时它不是中介，而是异质性来源。
+
+### 推荐写作顺序
+
+```text
+主论证：两步法
+补充表格：三步法或三步法变体
+进阶量化：ADVANCED.md 中的因果中介 / IV-mediation / 残差法
+```
+
+---
+
+## 输出规范
+
+```text
+output/
+  mechanism_baseline.csv
+  mechanism_step2_mediator.csv
+  mechanism_three_step.csv
+  mechanism_group_heterogeneity.csv
+  mechanism_writeup_notes.md
+```
