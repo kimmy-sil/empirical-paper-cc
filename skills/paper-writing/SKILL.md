@@ -1,303 +1,176 @@
-# 学术论文写作规范
+---
+name: paper-writing
+description: Draft academic paper sections with pipeline-aware context, estimand protocol, causal language calibration, and automatic humanizer pass.
+argument-hint: "[section: intro | background | strategy | data | results | conclusion | abstract | full | humanize] [--journal NAME] [--lang cn|en]"
+workflow_stage: 5
+allowed-tools: Read, Write, Edit, Grep, Glob, Task
+tags:
+  - LaTeX
+  - academic-writing
+  - empirical-paper
+trigger: Manual — invoke after regression outputs exist in quality_reports/
+---
 
-## 适用场景
+# Paper Writing
 
-- 经管领域实证论文（中文/英文）
-- DID/IV/RDD/Panel FE 等因果推断论文
-- 触发关键词：写引言、写文献综述、写实证策略、写结果讨论、写结论、润色论文、academic writing
+Draft paper sections or apply humanizer pass. Each invocation targets **one section** (or `full` for sequential drafting with pauses).
+
+> **This is the user's paper, not Claude's.** Match their voice. Never fabricate results. Only cite confirmed papers.
 
 ---
 
-## 论文结构表
+## Step 0: Context Gathering
 
-| 节 | 中文字数 | 英文字数 | 段落数 |
-|---|---------|---------|-------|
-| 摘要 | 300–400 | 150–250 | 1 |
-| 引言 | 2000–3000 | 1500–2000 | 5–6 |
-| 制度背景 | 1500–2500 | 1000–1500 | 3–4 |
-| 文献综述 | 1500–2000 | 1000–1500 | 按主题分 |
-| 数据与变量 | 1000–1500 | 800–1200 | 3–4 |
-| 识别策略 | 1000–1500 | 800–1200 | 含公式 |
-| 实证结果 | 2000–3000 | 1500–2500 | 按表分 |
-| 结论 | 800–1200 | 600–1000 | 3–4 |
-| 参考文献 | ≥25条 | ≥30条 | — |
+Before drafting ANY section, read all available context in order:
 
----
+| # | Path | Purpose |
+|---|------|---------|
+| 1 | `quality_reports/research_spec_*.md` | Research question, hypotheses, strategy |
+| 2 | `.claude/references/domain-profile.md` | Field conventions, terminology |
+| 3 | `.claude/references/journal-profiles.md` | Target journal style calibration |
+| 4 | `.claude/references/endogeneity-routing.md` | Identification strategy rationale |
+| 5 | `paper/sections/` | Existing draft sections (if any) |
+| 6 | `paper/tables/` and `paper/figures/` | Generated regression output |
+| 7 | `quality_reports/results_summary.md` | Coder's results summary (if exists) |
+| 8 | `Bibliography_base.bib` | Available citation keys |
+| 9 | `data/raw/data_provenance.md` | Data sources for Data section |
 
-## 摘要写作模板
-
-句1–2: 研究问题与重要性（背景数据或现实张力）
-句3: 数据与方法（"本文利用……数据，采用……方法"）
-句4–5: 核心发现（具体系数/方向/量级，不用"显著提高"等无量级表述）
-句6: 机制或异质性（可选）
-句7: 政策含义
-
-摘要禁止出现"本文旨在""探讨了""值得注意的是"等套语。每个核心发现必须有具体数字。
+**Journal calibration**: If `--journal` is specified or journal-profiles.md exists, adjust:
+- Word count range per section
+- Introduction style (tight vs. extended institutional background)
+- Citation density and format (natbib vs biblatex)
+- 制度背景长度（中文期刊通常更长）
 
 ---
 
-## 引言写作（漏斗式）
+## Section Routing
 
-**结构逻辑：大背景 → 文献脉络 → 本文做法 → 核心发现 → 贡献声明 → 结构安排**
+Based on `$ARGUMENTS`:
 
-### 段落1：宏观背景与现象
+| Argument | Output file | Dependencies |
+|----------|------------|--------------|
+| `intro` | `paper/sections/introduction.tex` | Write LAST — needs all results |
+| `background` | `paper/sections/background.tex` | Can write early (needs domain-profile) |
+| `strategy` | `paper/sections/strategy.tex` | Needs research_spec + endogeneity-routing |
+| `data` | `paper/sections/data.tex` | Needs data_provenance + descriptive stats tables |
+| `results` | `paper/sections/results.tex` | Needs regression tables in paper/tables/ |
+| `conclusion` | `paper/sections/conclusion.tex` | Needs results section complete |
+| `abstract` | `paper/sections/abstract.tex` | Write LAST — needs all sections |
+| `full` | All sections in sequence | Pause between sections for user feedback |
+| `humanize [file]` | Edited file in place | Existing draft |
 
-打开引言，用2–3句引出研究主题的社会/经济重要性。引用权威机构数据或近期政策背景。第一句不用"随着""在……背景下""近年来"等套语。段内至少一处实证数据引用。
+### Recommended Writing Order
 
-示例框架："[主题] 是 [领域] 中的核心议题。[量化背景数据]。然而，关于 [具体机制/效应] 的因果证据仍然匮乏。"
-
-### 段落2：文献脉络与研究空白
-
-综述现有研究做了什么，指出研究空白。三类常见空白：因果识别不足（相关性≠因果）、中国/发展中国家情境缺失、特定子人群或机制未被探索。
-
-示例框架："已有研究主要从 [维度A] 和 [维度B] 探讨这一问题（Author, Year; Author, Year），但存在两方面不足：其一，……其二，……"
-
-### 段落3：本文做法
-
-一句话介绍数据来源，一句话介绍识别策略，说明外生变异来源。
-
-示例框架："本文利用 [数据来源，时间范围，观测单元]，以 [政策/事件] 作为准自然实验，采用 [方法] 识别 [X] 对 [Y] 的因果效应。[政策] 的实施在时间上具有外生性，原因在于……"
-
-### 段落4：主要发现
-
-先报告基准结果（系数方向+显著性+经济量级），再提1–2个异质性发现。使用具体数字，不使用"显著提高"等无量级的表述。
-
-示例框架："基准回归显示，[X] 使 [Y] 平均 [上升/下降] [X]%（[显著性水平]）。进一步分析发现，该效应在 [子样本] 中更为突出，幅度达 [Y]%，而在 [子样本] 中效应不显著。"
-
-### 段落5：贡献声明
-
-列出2–3点贡献，与文献钩挂，使用标准学术表达。
-
-中文句型："本文的边际贡献可能在于以下几个方面：第一，在……文献的基础上，本文首次从……视角考察了……，丰富了……领域的研究。第二，在方法层面，……第三，……"
-
-英文句型："We contribute to the literature on X by... First,... Second,... Third,..."
-
-贡献三类型：文献贡献（首次提供……的因果证据）、方法贡献（采用……解决了……的识别难题）、政策贡献（发现对……政策制定具有含义）。
-
-### 段落6：结构安排
-
-一句话说明各节内容。中文："本文其余部分安排如下：第二节……第三节……第四节……第五节……" 英文："The rest of the paper proceeds as follows. Section 2... Section 3..."
-
----
-
-## 制度背景写作
-
-段落1: 政策出台的宏观背景（国家层面的政策目标与问题诊断）
-
-段落2: 政策具体内容（时间/地理范围/执行力度/关键节点）
-
-段落3: 外生性论证（为什么政策实施时间/范围不受研究对象影响——这是识别假设的文字依据）
-
-段落4: 政策到变量映射（如何从政策规定转化为 Treat×Post 或工具变量——让读者理解数据构造逻辑）
-
-制度背景节不是背景介绍，核心目的是支撑识别假设。每一段都应与识别策略挂钩。
-
----
-
-## 文献综述写作
-
-**原则：按研究主题/争论点/方法组织，不按时间顺序列举。**
-
-### 推荐结构（3–4个主题组团）
-
-每个主题组内部结构：
-1. 开篇句：该组文献研究什么问题
-2. 主要发现综述（引用3–5篇代表文献）
-3. 现有局限（1–2句）
-4. 本文如何推进
-
-主题组A — 与本文因变量/现象直接相关的文献
-
-主题组B — 与本文自变量/政策/干预相关的文献
-
-主题组C — 与本文方法/识别策略相关的文献
-
-过渡句示例："本文在上述文献基础上，进一步……" / "与 [Author, Year] 不同，本文……" / "本文的贡献在于首次……"
-
----
-
-## 数据与变量写作
-
-包含以下要素，按顺序呈现：
-
-数据来源: 数据库名称、数据类型、时间跨度、数据来源机构，注明数据的公开性/可获取性。
-
-样本筛选: 逐条说明筛选标准（去除缺失值/极端值/特殊样本的理由），报告最终样本量。
-
-变量定义: 核心变量的构造方式，必要时给出公式。建议以LaTeX表格呈现（变量名/定义/数据来源）。
-
-描述性统计: 引用格式——"Table 1报告了主要变量的描述性统计。[变量] 的均值为 [X]，标准差为 [Y]，样本间差异较大。"
-
----
-
-## 识别策略写作
-
-### 模型公式（LaTeX）
-
-公式使用单反斜杠（\alpha 不是 \\alpha），放在 equation 环境中并编号。
-
-```latex
-\begin{equation}
-Y_{it} = \alpha + \beta \, \text{Treat}_{i} \times \text{Post}_{t} + \gamma X_{it} + \mu_i + \lambda_t + \varepsilon_{it}
-\label{eq:main}
-\end{equation}
+```
+background → strategy → data → results → conclusion → intro → abstract
 ```
 
-符号表说明顺序：因变量 → 核心解释变量 → 控制变量 → 固定效应 → 误差项
-
-### Estimand 声明（必须！）
-
-在识别策略节明确声明估计的因果量（参见下方 Estimand 表）。示例：
-
-"本文估计的因果量为处理组的平均处理效应（ATT）。在 TWFE 框架下，该估计量为各处理期系数的加权平均，权重可能为负（Callaway and Sant'Anna, 2021）。为此，本文同时汇报基于 [CS/SA] 估计量的结果。"
-
-### 识别假设讨论
-
-每个假设用一段独立讨论，结构：假设陈述（一句话）→ 直觉解释（为什么成立）→ 对应检验（用什么结果支撑）。
-
-DID 核心假设清单：
-- 平行趋势假设 → 事件研究图，预处理系数不显著
-- 无预期效应假设 → 领先期系数检验
-- 稳定性单位处理假设（SUTVA） → 讨论溢出可能性
-- 无同期混淆政策 → 制度背景节说明
+Introduction and abstract are written LAST because they must reference final results.
 
 ---
 
-## 实证结果写作
+## Section Standards
 
-**写作顺序：陈述结果 → 统计显著性 → 经济量级 → 机制解释 → 与文献对比**
+| Section | EN words | CN chars | Key Requirements |
+|---------|----------|----------|-----------------|
+| Abstract | 100–150 | 300–500 | Question → method → finding with magnitude → implication |
+| Introduction | 1000–1500 | 3000–5000 | Hook → gap → question → method → finding → contribution → roadmap |
+| Background | 800–1200 | 2500–4000 | Institutional context, policy timeline, literature positioning |
+| Strategy | 800–1200 | 2500–4000 | Estimand → formal model → assumptions → threats |
+| Data & Variables | 600–1000 | 2000–3000 | Sources, sample construction, variable definitions, descriptive stats |
+| Results | 800–1500 | 2500–5000 | Main spec → robustness → heterogeneity → mechanisms |
+| Conclusion | 500–700 | 1500–2200 | Restate finding + magnitude → policy → limitations → future |
 
-### 基准回归段落模板
-
-"Table [X] 报告了基准回归结果。列（1）仅控制个体和时间固定效应，核心变量 [Treat×Post] 的系数为 [X]（标准误 = [Y]），在 [Z]% 水平上显著。列（2）加入控制变量后，系数变为 [X']，幅度变化约 [%]，说明 [控制变量对选择偏误的纠正有限/显著]。从经济量级看，该系数意味着……相当于样本均值的 [%]。这一发现与 [Author, Year] 的结论 [一致/不同]，[原因一句]。"
-
-### 稳健性检验分层写法
-
-核心稳健性（每种2–3句，解释为什么做这个检验+结果）：
-
-"[检验名称]：为排除……的担忧，我们……。结果（Table X, Column Y）显示系数与基准估计统计上无显著差异，量级变化 [方向] [幅度]，说明基准结果稳健。"
-
-一般稳健性（每种1句汇总）：
-
-"此外，我们还进行了若干稳健性检验，包括 [检验1]、[检验2] 和 [检验3]，结果均与基准估计一致（Table X）。"
-
-### 机制检验引用
-
-"为理解上述效应的传导路径，我们检验了……机制。若……机制成立，则我们预期 [中间变量] 会 [方向性变化]。Table X 报告了以 [中间变量] 为因变量的回归结果，系数符号 [预期方向]（p < [X]%），支持……机制的存在。"
-
-### 异质性分析引用
-
-"我们预期该效应在……条件下更强，原因在于……。Table X Panel B 证实了这一预期：[子样本A] 的系数为 [X]（[显著性]），而 [子样本B] 的系数为 [Y]（[显著性]），两者在 [Z]% 水平上存在显著差异（交叉项检验）。"
+For detailed templates of each section, read `skills/paper-writing/ADVANCED.md`.
 
 ---
 
-## 结论写作
+## Estimand Declaration Protocol
 
-**禁止：重复引言第一段的套话；逐一列举每个回归结果。**
-
-段落1：核心发现（综合，非列举）——以1–2句话用研究问题语言（非统计语言）表达核心发现。
-
-段落2：机制与贡献——本文结果从什么角度推进了对该现象的理解，与现有文献如何衔接。
-
-段落3：政策含义——具体，避免空泛。说明"给谁的政策建议，做什么，为什么"。
-
-段落4：局限性与未来研究——诚实列出1–2个主要局限（数据限制、外部效度、识别假设的可检验性等），提出未来研究方向。
-
----
-
-## 英文写作补充
-
-### 因果语言使用规范
-
-- **leads to / causes**：仅在识别策略可信时使用，明确因果主张
-- **is associated with / is correlated with**：描述相关性，不作因果主张
-- **suggests / indicates**：温和因果，适合稳健性证据或机制
-- **prove / demonstrate**：避免使用，学术写作通常用 provide evidence that
-
-### Hedging 用词
-
-适度使用 may, might, appear to, seem to, tend to 表达不确定性，但不要过度hedging导致结论模糊。核心发现用肯定句，周边推断用hedged语言。
-
-### 参考文献格式
-
-APA 7（英文期刊主流）：Author, A. A., & Author, B. B. (Year). Title of article. *Journal Name*, *Volume*(Issue), pages. https://doi.org/xxxxx
-
-GB/T 7714（中文期刊要求）：作者. 题名[J]. 刊名, 年份, 卷(期): 起止页码. DOI.
-
----
-
-## 参考文献管理
-
-### natbib 基本用法
+Before writing the Strategy section, produce this table:
 
 ```latex
-\usepackage{natbib}
-
-% 括号引用（文末）
-\citep{callaway2021} → (Callaway and Sant'Anna, 2021)
-
-% 文内引用（作者为主语）
-\citet{callaway2021} → Callaway and Sant'Anna (2021)
-
-% 仅年份
-\citeyearpar{callaway2021} → (2021)
+% === ESTIMAND DECLARATION ===
+% Target parameter : ATT / ATE / LATE / ITT / CATE
+% Identification   : DID / IV / RDD / FE / Matching / RCT
+% Key assumption   : Parallel trends / Exclusion / Continuity
+% Estimator        : TWFE / CS-DID / 2SLS / Local poly / IPW-DR
+% Std. errors      : Cluster(firm) / HC2 / Wild bootstrap
+% Primary equation : Eq. (\ref{eq:main})
 ```
 
-### APA 7 vs GB/T 7714 选择
-
-投英文期刊：用 APA 7 或期刊指定格式（如 Chicago Author-Date）。
-投中文期刊：用 GB/T 7714-2015。
-同一篇文章不混用两种格式。
+This table is referenced by the Strategy section AND the methods-referee agent.
 
 ---
 
-## Estimand 声明表（每篇论文必须明确）
+## Causal Language Calibration
 
-| 方法 | Estimand | 必须声明 |
-|------|----------|---------|
-| DID TWFE | 加权ATT（可能含负权重） | 权重分布 + 负权重比例 |
-| DID CS/SA | Group-time ATT聚合 | 聚合权重依据 |
-| IV 2SLS | LATE（顺从者的平均处理效应） | 顺从者特征描述 |
-| RDD | 断点处LATE | 不可外推至断点以外 |
-| PSM-DID | ATT | 共同支撑样本损失 |
-| OLS 同质 | ATE | 论证同质性 |
-| OLS 异质 | 处理方差加权均值 ≠ ATE | 明确不是ATE |
-| SC | 单一单元ATT | 合成控制权重分布 |
+| Design | Allowed verbs | Forbidden |
+|--------|--------------|-----------|
+| RCT | causes, leads to, increases | — |
+| Quasi-experimental (DID/IV/RDD) | affects, leads to, results in | proves, causes (unless very careful) |
+| Selection-on-observables | is associated with, predicts, correlates with | causes, leads to, affects |
+| Descriptive | co-occurs with, is correlated with | any causal verb |
+
+**Hedging gradient**: Use "suggests" for single-study findings, "indicates" for findings consistent with prior work, "demonstrates" only for RCT/very strong designs.
 
 ---
 
-## 写作质量红线
+## Incomplete Data Protocol
 
-正文中一律禁止以下表达：
+When data is unavailable, use markers (NEVER fabricate):
 
-| 禁止表达 | 替代方案 |
-|---------|---------|
-| 值得注意的是 | 直接陈述该事实 |
-| 综上所述 | 结论段首句直接总结核心发现 |
-| 取决于 | "在……条件下" / "随……变化" |
-| 不难发现 | 直接陈述 |
-| 由此可见 | 直接陈述 |
-| 进一步地 | 用具体逻辑连接词（如"为检验……"） |
-| 相关性极强 | 报告具体系数/R² |
-| 显著提高/下降 | 报告具体系数和显著性水平 |
-| 随着……的不断深入 | 改写为具体背景句 |
-| 充分说明了 | 直接说结果说明了什么 |
-
-此外：不过度使用破折号；不用感叹号；正文用完整段落散文，不用项目符号列表；每个claim必须有数据或引文支撑。
+| Marker | Meaning | Render as |
+|--------|---------|-----------|
+| `\textbf{[TBD]}` | Regression result not yet available | Bold placeholder |
+| `\textbf{[VERIFY]}` | Citation exists but needs user confirmation | Bold flag |
+| `\textbf{[PLACEHOLDER: description]}` | Effect size awaiting final estimate | Bold with description |
 
 ---
 
-## 快速检查清单
+## Quality Red Lines
 
-在输出任何章节前确认：
+### Banned Phrases (auto-check before output)
 
-- [ ] 每段有明确主题句，段尾收束
-- [ ] 无禁止用语
-- [ ] 所有实证数字有来源（回归表/描述性统计表）
-- [ ] 因果语言谨慎：仅在识别策略可信时使用"导致"/"因果"
-- [ ] Estimand 已在识别策略节明确声明
-- [ ] 文献引用格式一致（全文统一 APA 7 或 GB/T 7714）
-- [ ] 段落长度适中（中文150–300字，英文100–200词）
-- [ ] 全文结构完整，无"待补充"占位符
-- [ ] 摘要涵盖5要素：背景/问题/方法/发现/意义
-- [ ] 结论不重复引言，有局限性讨论
+Grep the draft for these — if found, rewrite:
+
+```
+delve, utilize, leverage, nuanced, robust (as adjective for findings),
+noteworthy, it is important to note, notably, interestingly,
+in conclusion (mid-paper), as shown above, the above analysis,
+令人瞩目, 毋庸置疑, 众所周知, 不言而喻
+```
+
+### Humanizer Pass (automatic on every draft)
+
+Strip AI patterns across 4 categories before presenting:
+
+| Category | Patterns to remove |
+|----------|--------------------|
+| **Structural** | Forced narrative arc, artificial "First...Second...Third" progression |
+| **Lexical** | See banned phrases above + "furthermore", "moreover" overuse |
+| **Rhetorical** | Rule-of-three, negative parallelisms, em-dash overuse (max 2 per page) |
+| **Formatting** | Excessive bullet points in prose sections, promotional adjectives |
+
+---
+
+## Quality Self-Check
+
+Before presenting ANY draft section to user:
+
+- [ ] Every displayed equation is numbered (`\label{eq:...}`)
+- [ ] All `\cite{}` keys exist in `Bibliography_base.bib`
+- [ ] Introduction contribution paragraph names specific papers (not "prior literature")
+- [ ] Effect sizes stated with units and economic interpretation
+- [ ] No banned phrases (run grep)
+- [ ] Notation consistent with Estimand Declaration
+- [ ] All referenced tables/figures actually exist in `paper/tables/` or `paper/figures/`
+- [ ] Causal language matches identification design
+- [ ] TBD/VERIFY/PLACEHOLDER items flagged clearly to user
+
+### Present to User
+
+Flag items needing attention:
+- **TBD items**: Where empirical results are needed but not yet available
+- **VERIFY items**: Citations that need user confirmation
+- **PLACEHOLDER items**: Effect sizes awaiting final estimates
