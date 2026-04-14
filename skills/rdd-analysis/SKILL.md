@@ -1,3 +1,8 @@
+---
+name: rdd-analysis
+description: "断点回归设计，含 RD 图、带宽选择、McCrary 密度检验、安慰剂检验"
+---
+
 # 断点回归设计 (RDD)
 
 ## 概述
@@ -11,6 +16,19 @@
 - **Fuzzy RDD**：超过阈值大幅提高处理概率（不完全服从），等价于在断点附近做 IV
 
 **识别假设：** 潜在结果 E[Y(0)|R] 和 E[Y(1)|R] 在阈值 c 处连续（无操控）。
+
+---
+
+## 适用性自检（决策前诊断）
+
+> **在开始 RDD 分析之前，必须通过以下四项自检。任一不通过则 RDD 可能不是最佳方法。**
+
+| # | 自检问题 | 通过标准 | 不通过时的替代 |
+|---|----------|----------|----------------|
+| 1 | **是否存在明确的、外生的阈值？** | 阈值由制度/法规明确规定，非研究者自选 | 阈值模糊或多变 → 考虑 DID 或 IV |
+| 2 | **阈值附近是否有足够多的观测？** | 带宽内两侧各有 ≥ 50 个有效观测 | 断点附近数据稀疏 → 扩大数据或换方法 |
+| 3 | **个体能否精确操控评分变量？** | 个体无法精确操控（如官方考试分数） | 可精确操控（如自评指标） → RDD 内部效度崩塌 |
+| 4 | **LATE at cutoff 是否有政策含义？** | 断点附近效应即为研究关注的核心 | 关心全样本 ATE → 考虑 DID、IV 或实验 |
 
 ---
 
@@ -56,6 +74,31 @@ df <- df %>%
   )
 ```
 
+### 离散评分变量预诊断
+
+> ⚠️ **在进入主流程之前，先检查评分变量是否为离散型（整数或大量重复值）。**
+> 离散评分变量影响带宽选择和标准误计算，应在此处提前诊断，而非留到最后。
+
+```r
+# R: 离散评分变量预诊断
+n_unique <- length(unique(df$r_centered))
+cat(sprintf("评分变量唯一值数量：%d\n", n_unique))
+if (n_unique < 30) {
+  cat("⚠️  唯一值较少（< 30），离散评分变量情形\n")
+  cat("   后续所有 rdrobust 调用将使用 masspoints='adjust'（默认）\n")
+  cat("   带宽选择和标准误将自动调整，但结论需更谨慎\n")
+}
+```
+
+```python
+# Python: 离散评分变量预诊断
+n_unique = df['r_centered'].nunique()
+print(f"评分变量唯一值数量：{n_unique}")
+if n_unique < 30:
+    print("⚠️  唯一值较少（< 30），离散评分变量情形")
+    print("   后续 rdrobust 调用使用 masspoints='adjust'")
+```
+
 ### 包依赖
 
 ```r
@@ -64,7 +107,7 @@ library(rdrobust)    # 主估计、带宽选择
 library(rddensity)   # 密度/操控检验
 library(dplyr)
 library(ggplot2)
-library(fixest)      # 控制变量 + FE（RD-DD）
+library(fixest)      # 控制变量 + FE（RD-DD）+ 参数法 RDD
 ```
 
 ```python
@@ -75,6 +118,23 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 ```
+
+---
+
+## 分析流程总览
+
+```
+Step 1: RD Plot（初步目检）
+Step 2: 密度/操控检验（内部效度门槛）      ← 先验证可行性
+Step 3: 协变量平衡检验（辅助验证）          ← 先验证可行性
+Step 4: 带宽选择（MSE + CER）
+Step 5: 主估计（Sharp / Fuzzy）
+Step 6: 稳健性（带宽 + 多项式 + 安慰剂 + Donut + 参数法）
+Step 7: 离散评分变量处理（如适用）
+```
+
+> **逻辑：先验证 RDD 可行性（Step 2-3），再做估计（Step 4-5），最后稳健性（Step 6-7）。**
+> 如果 Step 2 密度检验失败（存在操控），后续所有步骤的结论都要打问号。
 
 ---
 
@@ -96,7 +156,6 @@ rdplot(
   x.label = "Running Variable (centered)",
   y.label = "Outcome"
 )
-# 推荐报告：将此图直接保存为论文图
 
 # Mimicking Variance (MV) 分箱（更平滑，推荐对比）
 rdplot(y = df$outcome, x = df$r_centered, c = 0,
@@ -104,75 +163,128 @@ rdplot(y = df$outcome, x = df$r_centered, c = 0,
        title = "RDD Plot (MV binning)")
 ```
 
-### Python：matplotlib 分箱散点图（简化版）
+### Python：rdplot（推荐）
 
 ```python
-# Python: 手动分箱散点图（简化版，推荐用 R rdplot 作最终图）
-import numpy as np
+# Python: 使用 rdrobust 包的 rdplot（推荐，与 R 版本一致）
+from rdrobust import rdplot
 import matplotlib.pyplot as plt
-import pandas as pd
 
-def rdd_plot_python(df, r_col, y_col, n_bins=40, title="RDD Plot"):
-    """
-    Python 简化版 RD 图（推荐用 R rdplot 替代）。
-    
-    注意：使用 np.linspace 避免 bandwidth undefined 错误。
-    """
-    r = df[r_col].values
-    y = df[y_col].values
-    
-    # 使用 np.linspace 固定 40 个区间（避免 bandwidth undefined 错误）
-    bin_edges_left  = np.linspace(r.min(), 0, n_bins // 2 + 1)
-    bin_edges_right = np.linspace(0, r.max(), n_bins // 2 + 1)
-    bin_edges = np.unique(np.concatenate([bin_edges_left, bin_edges_right]))
-    
-    # 计算每个 bin 的均值
-    bin_idx = np.digitize(r, bin_edges) - 1
-    bin_idx = np.clip(bin_idx, 0, len(bin_edges) - 2)
-    
-    bin_data = []
-    for b in range(len(bin_edges) - 1):
-        mask = bin_idx == b
-        if mask.sum() >= 3:
-            bin_data.append({
-                'r_mid': np.mean(r[mask]),
-                'y_mean': np.mean(y[mask]),
-                'side': 'right' if np.mean(r[mask]) >= 0 else 'left'
-            })
-    
-    bdf = pd.DataFrame(bin_data)
-    left  = bdf[bdf['side'] == 'left']
-    right = bdf[bdf['side'] == 'right']
-    
-    fig, ax = plt.subplots(figsize=(8, 5))
-    ax.scatter(left['r_mid'],  left['y_mean'],  color='steelblue', label='Control', alpha=0.8)
-    ax.scatter(right['r_mid'], right['y_mean'], color='tomato',    label='Treated',  alpha=0.8)
-    
-    # 拟合线（局部线性）
-    from numpy.polynomial.polynomial import polyfit, polyval
-    for side_df, color in [(left, 'steelblue'), (right, 'tomato')]:
-        if len(side_df) >= 2:
-            x_s = side_df['r_mid'].values
-            y_s = side_df['y_mean'].values
-            coef = polyfit(x_s, y_s, 1)
-            x_line = np.linspace(x_s.min(), x_s.max(), 100)
-            ax.plot(x_line, polyval(x_line, coef), color=color, linewidth=2)
-    
-    ax.axvline(0, color='black', linestyle='--', linewidth=1)
-    ax.set_xlabel('Running Variable (centered)')
-    ax.set_ylabel('Outcome')
-    ax.set_title(title)
-    ax.legend()
-    plt.tight_layout()
-    return fig
-
-fig = rdd_plot_python(df, r_col='r_centered', y_col='outcome')
-fig.savefig('output/rdd_plot.png', dpi=150)
+# IMSE-optimal 分箱（默认）
+rdplot_out = rdplot(
+    y = df['outcome'].values,
+    x = df['r_centered'].values,
+    c = 0,
+    nbins = None,          # 自动 IMSE 最优
+    title = "RDD Plot",
+    x_label = "Running Variable (centered)",
+    y_label = "Outcome"
+)
+plt.savefig('output/rdd_plot.png', dpi=150)
+plt.show()
 ```
 
 ---
 
-## Step 2：带宽选择（MSE + CER 合并）
+## Step 2：密度检验（McCrary / rddensity）
+
+> ⚠️ **这是内部效度的门槛检验。如果密度检验失败（p < 0.10），RDD 的基本假设受到质疑，后续所有结果需谨慎解读。**
+
+检验评分变量在阈值处是否存在堆积（manipulation），H₀：无操控（密度连续）。
+
+```r
+# R: rddensity（Cattaneo et al. 2018，优于 McCrary 2008）
+library(rddensity)
+
+density_res <- rddensity(X = df$r_centered, c = 0)
+summary(density_res)   # 看 p-value（H0：连续 = 无操控）
+
+# 密度图（可视化）
+rdplotdensity(density_res, X = df$r_centered,
+              title = "Density Test: No Manipulation")
+
+# 提取 p 值
+density_pval <- density_res$test$p_jk
+cat(sprintf("密度检验 p 值 = %.4f\n", density_pval))
+if (density_pval < 0.10) {
+  cat("⚠️  检测到潜在操控迹象（p < 0.10），后续结论需特别谨慎\n")
+  cat("   考虑：(1) Donut RD 作为稳健性；(2) 重新审视研究设计\n")
+} else {
+  cat("✓  无操控证据（p > 0.10），可继续后续分析\n")
+}
+```
+
+```python
+# Python: rddensity（注意 API 差异）
+from rddensity import rddensity, rdplotdensity
+
+density_test = rddensity(X=df['r_centered'].values, c=0)
+density_test.summary()
+
+density_pval_py = density_test.p_jk
+print(f"密度检验 p 值 = {density_pval_py:.4f}")
+
+rdplotdensity(density_test, X=df['r_centered'].values)
+plt.savefig('output/rdd_density_test.png', dpi=150)
+```
+
+**说明：** rddensity（Cattaneo et al. 2018）在有限样本下优于 McCrary (2008) DCdensity 检验，已成为标准方法。
+
+---
+
+## Step 3：协变量平衡检验
+
+前定协变量（pre-determined covariates）在断点处不应有跳跃，否则提示操控或选择。
+
+```r
+# R: 对每个协变量做 rdrobust，期望 p > 0.10
+library(rdrobust)
+library(dplyr)
+
+covariates <- c("age", "income_pre", "education", "female")
+
+covariate_balance <- lapply(covariates, function(cov) {
+  res <- rdrobust(y = df[[cov]], x = df$r_centered, c = 0, p = 1,
+                  bwselect = "mserd")
+  data.frame(
+    covariate = cov,
+    coef_bc   = res$coef["Bias-Corrected", 1],
+    se_robust = res$se["Robust", 1],
+    p_robust  = res$pv["Robust", 1],
+    h         = res$bws["h", 1],
+    n_left    = res$N_h[1],
+    n_right   = res$N_h[2]
+  )
+}) %>% bind_rows()
+
+print(covariate_balance)
+cat("\n期望：所有协变量 p_robust > 0.10（无跳跃）\n")
+```
+
+```python
+# Python: 协变量平衡
+from rdrobust import rdrobust
+import pandas as pd
+
+covariates = ['age', 'income_pre', 'education', 'female']
+balance_results = []
+
+for cov in covariates:
+    res = rdrobust(y=df[cov].values, x=df['r_centered'].values, c=0, p=1)
+    balance_results.append({
+        'covariate': cov,
+        'coef_bc':   res.coef[1],    # Bias-corrected
+        'p_robust':  res.pv[2]       # Robust p-value
+    })
+
+balance_df = pd.DataFrame(balance_results)
+print(balance_df)
+balance_df.to_csv('output/rdd_covariate_balance.csv', index=False)
+```
+
+---
+
+## Step 4：带宽选择（MSE + CER 合并）
 
 **两类带宽：**
 - **MSE 带宽**（`bwselect="mserd"`）：最小化均方误差，用于**点估计**
@@ -220,108 +332,6 @@ print(f"MSE 最优带宽 h = {h_mse:.4f}")
 
 ---
 
-## Step 3：密度检验（McCrary / rddensity）
-
-检验评分变量在阈值处是否存在堆积（manipulation），H₀：无操控（密度连续）。
-
-```r
-# R: rddensity（Cattaneo et al. 2018，优于 McCrary 2008）
-library(rddensity)
-
-density_res <- rddensity(X = df$r_centered, c = 0)
-summary(density_res)   # 看 p-value（H0：连续 = 无操控）
-
-# 密度图（可视化）
-rdplotdensity(density_res, X = df$r_centered,
-              title = "Density Test: No Manipulation")
-
-# 提取 p 值
-density_pval <- density_res$test$p_jk
-cat(sprintf("密度检验 p 值 = %.4f\n", density_pval))
-if (density_pval < 0.10) {
-  cat("⚠️  检测到潜在操控迹象（p < 0.10），考虑 Donut RD\n")
-} else {
-  cat("✓  无操控证据（p > 0.10）\n")
-}
-```
-
-```python
-# Python: rddensity（注意 API 差异）
-from rddensity import rddensity, rdplotdensity
-
-density_test = rddensity(X=df['r_centered'].values, c=0)
-density_test.summary()
-
-# Python API 关键：
-# p 值在 density_test.p_jk（非 .summary() 的对象）
-# 系数：density_test.hat['left'] 和 ['right']
-density_pval_py = density_test.p_jk
-print(f"密度检验 p 值 = {density_pval_py:.4f}")
-
-rdplotdensity(density_test, X=df['r_centered'].values)
-plt.savefig('output/rdd_density_test.png', dpi=150)
-```
-
-**说明：** rddensity（Cattaneo et al. 2018）在有限样本下优于 McCrary (2008) DCdensity 检验，已成为标准方法。
-
----
-
-## Step 4：协变量平衡检验
-
-前定协变量（pre-determined covariates）在断点处不应有跳跃，否则提示操控或选择。
-
-```r
-# R: 对每个协变量做 rdrobust，期望 p > 0.10
-library(rdrobust)
-library(dplyr)
-
-covariates <- c("age", "income_pre", "education", "female")
-
-covariate_balance <- lapply(covariates, function(cov) {
-  res <- rdrobust(y = df[[cov]], x = df$r_centered, c = 0, p = 1,
-                  bwselect = "mserd")
-  data.frame(
-    covariate = cov,
-    coef_bc   = res$coef["Bias-Corrected", 1],
-    se_robust = res$se["Robust", 1],
-    p_robust  = res$pv["Robust", 1],
-    h         = res$bws["h", 1],
-    n_left    = res$N_h[1],
-    n_right   = res$N_h[2]
-  )
-}) %>% bind_rows()
-
-print(covariate_balance)
-cat("\n期望：所有协变量 p_robust > 0.10（无跳跃）\n")
-```
-
-```python
-# Python: 协变量平衡（修复 API：用 res.coef[0] 而非 res.coef.loc['Conventional']）
-from rdrobust import rdrobust
-import pandas as pd
-
-covariates = ['age', 'income_pre', 'education', 'female']
-balance_results = []
-
-for cov in covariates:
-    res = rdrobust(y=df[cov].values, x=df['r_centered'].values, c=0, p=1)
-    # 正确 API（Python rdrobust）：
-    # res.coef[0]  = Conventional 系数
-    # res.coef[1]  = Bias-corrected 系数
-    # res.pv[2]    = Robust p 值（索引 2，非 'Robust'）
-    balance_results.append({
-        'covariate': cov,
-        'coef_bc':   res.coef[1],    # Bias-corrected
-        'p_robust':  res.pv[2]       # Robust p-value
-    })
-
-balance_df = pd.DataFrame(balance_results)
-print(balance_df)
-balance_df.to_csv('output/rdd_covariate_balance.csv', index=False)
-```
-
----
-
 ## Step 5：主估计
 
 ### Sharp RDD
@@ -364,10 +374,6 @@ rdd_main = rdrobust(y=df['outcome'].values, x=df['r_centered'].values,
                     c=0, p=1, kernel='triangular', bwselect='mserd')
 rdd_main.summary()
 
-# Python API：
-# rdd_main.coef[1]   = Bias-corrected 估计
-# rdd_main.ci[2, :]  = Robust CI [下界, 上界]
-# rdd_main.bws[0, 0] = 主带宽 h
 coef_bc = rdd_main.coef[1]
 ci_lo, ci_hi = rdd_main.ci[2, 0], rdd_main.ci[2, 1]
 print(f"RDD 估计 = {coef_bc:.4f}, Robust CI = [{ci_lo:.4f}, {ci_hi:.4f}]")
@@ -510,6 +516,8 @@ placebo_res <- lapply(fake_cutoffs, function(fc) {
   # 使用远离真实断点的区域
   sub_df <- if (fc < 0) df %>% filter(r_centered < -abs(fc)/2) else
                         df %>% filter(r_centered >  abs(fc)/2)
+  # 样本量保护：子样本过小时跳过
+  if (nrow(sub_df) < 50) return(NULL)
   tryCatch({
     res <- rdrobust(y = sub_df$outcome, x = sub_df$r_centered, c = fc, p = 1)
     data.frame(fake_cutoff = fc,
@@ -533,7 +541,7 @@ cat("期望：所有假断点 p_robust > 0.10（系数不显著）\n")
 
 if (density_pval < 0.10) {
   cat("⚠️  密度检验显示操控嫌疑，执行 Donut RD\n")
-  
+
   donut_widths <- c(0.05, 0.10, 0.20) * h_main
   donut_results <- lapply(donut_widths, function(d) {
     df_d <- df %>% filter(abs(r_centered) >= d)
@@ -544,7 +552,7 @@ if (density_pval < 0.10) {
                ci_lo     = res$ci["Robust", 1],
                ci_hi     = res$ci["Robust", 2])
   }) %>% bind_rows()
-  
+
   cat("\n=== Donut RD 结果（与标准 RD 对比）===\n")
   cat(sprintf("标准 RD: %.4f\n", coef_bc))
   print(donut_results)
@@ -553,15 +561,71 @@ if (density_pval < 0.10) {
 }
 ```
 
+### 6e：参数法 RDD 对比（稳健性，非主规格）
+
+> **说明：** 主规格使用 `rdrobust`（非参数局部多项式），参数法 OLS 仅作稳健性对比。
+> 两者结果应**方向一致**。若方向相反，需检查带宽选择或模型设定。
+
+```r
+# R: 参数法 RDD（全样本 OLS，稳健性对比）
+library(fixest)
+
+# 方法1：全样本参数法
+res_param_full <- feols(
+  outcome ~ r_centered * above_cutoff | fe_var,
+  data    = df,
+  cluster = ~cluster_var
+)
+
+# 方法2：限制在 MSE 最优带宽内的参数法（推荐对比）
+df_bw <- df %>% filter(abs(r_centered) <= h_main)
+res_param_bw <- feols(
+  outcome ~ r_centered * above_cutoff | fe_var,
+  data    = df_bw,
+  cluster = ~cluster_var
+)
+
+# 三规格对比
+cat("=== 非参数 vs 参数法对比 ===\n")
+cat(sprintf("非参数（rdrobust，主规格）: %.4f [%.4f, %.4f]\n",
+            coef_bc, ci_lo, ci_hi))
+cat(sprintf("参数法（带宽内 OLS）:       %.4f (SE=%.4f)\n",
+            coef(res_param_bw)["above_cutoff"],
+            se(res_param_bw)["above_cutoff"]))
+cat(sprintf("参数法（全样本 OLS）:       %.4f (SE=%.4f)\n",
+            coef(res_param_full)["above_cutoff"],
+            se(res_param_full)["above_cutoff"]))
+cat("\n期望：三者方向一致，幅度接近\n")
+```
+
+```python
+# Python: 参数法 RDD（statsmodels OLS）
+import statsmodels.formula.api as smf
+
+# 限制在带宽内
+h_main_py = rdd_main.bws[0, 0]
+df_bw = df[df['r_centered'].abs() <= h_main_py].copy()
+
+res_param = smf.ols(
+    'outcome ~ r_centered * above_cutoff',
+    data=df_bw
+).fit(cov_type='cluster', cov_kwds={'groups': df_bw['cluster_var']})
+
+print(f"参数法 RDD（带宽内 OLS）: {res_param.params['above_cutoff']:.4f}")
+print(f"非参数（rdrobust）:       {coef_bc:.4f}")
+```
+
 ---
 
 ## Step 7：离散评分变量（Mass Points）
+
+> ⚠️ **离散评分变量影响带宽选择和标准误。应在 Step 4 带宽选择前已完成预诊断（见前置条件）。**
+> 本步骤提供详细的诊断和调整方法。
 
 当评分变量为整数或有大量重复值时，自动处理。
 
 ```r
 # R: rdrobust masspoints="adjust"（默认行为，自动检测和调整）
-# rdrobust 默认 masspoints="adjust"，无需手动设置
 rdd_discrete <- rdrobust(
   y          = df$outcome,
   x          = df$r_centered,
@@ -570,7 +634,6 @@ rdd_discrete <- rdrobust(
   masspoints = "adjust"  # 默认值，自动处理离散评分变量
 )
 summary(rdd_discrete)
-# 若存在大量 mass points，rdrobust 会自动调整带宽和标准误
 
 # 诊断：评分变量的唯一值数量
 n_unique <- length(unique(df$r_centered))
@@ -579,7 +642,7 @@ if (n_unique < 30) {
   cat("⚠️  唯一值较少（< 30），离散评分变量情形\n")
   cat("   masspoints='adjust' 已自动处理，但结论需谨慎\n")
   cat("   建议：报告 masspoints='check' 的诊断信息\n")
-  
+
   rdd_check <- rdrobust(y = df$outcome, x = df$r_centered, c = 0,
                         masspoints = "check")
   cat("Mass points 诊断信息：\n")
@@ -593,7 +656,8 @@ if (n_unique < 30) {
 
 | 检验 | 方法 | 通过标准 |
 |------|------|----------|
-| 断点可视化 | `rdplot`（R）或分箱散点图（Python） | 肉眼可见跳跃，图形合理 |
+| 适用性自检 | 4 问诊断 | 4 项全部通过 |
+| 断点可视化 | `rdplot`（R / Python） | 肉眼可见跳跃，图形合理 |
 | 密度/操控检验 | `rddensity`（Cattaneo 2018） | p > 0.10（无操控） |
 | 协变量平衡 | `rdrobust` 对每个协变量 | 所有 p_robust > 0.10 |
 | 主估计 | `rdrobust` p=1，MSE带宽 | 报告 Bias-corrected + Robust CI |
@@ -601,6 +665,7 @@ if (n_unique < 30) {
 | 带宽敏感性 | 0.5h ~ 1.5h | 系数方向一致，幅度稳定 |
 | 安慰剂断点 | 假 cutoff（控制组侧） | 系数不显著 |
 | Donut Hole | 仅密度检验显著时 | 与标准 RD 结论一致 |
+| 参数法对比 | OLS（带宽内 + 全样本） | 与非参数主规格方向一致 |
 | Fuzzy：第一阶段 | `rdrobust(y=D, x=R, c=0)` | 跳跃显著，Complier 比例合理 |
 | Fuzzy：Wald 验证 | ITT / FS ≈ TOT | 比值接近（< 5% 差异） |
 
@@ -609,7 +674,7 @@ if (n_unique < 30) {
 ## 常见错误（6 条）
 
 > **错误 1：直接用 OLS 加 above_cutoff 哑变量**
-> 传统 `y ~ r + above + r*above` 的估计量和标准误均不可靠，带宽 ad-hoc。应使用 `rdrobust` 局部多项式 + MSE 最优带宽。
+> 传统 `y ~ r + above + r*above` 的估计量和标准误均不可靠，带宽 ad-hoc。应使用 `rdrobust` 局部多项式 + MSE 最优带宽。参数法 OLS 仅可作为稳健性对比（见 Step 6e），不应作为主规格。
 
 > **错误 2：只报告 Conventional 估计量**
 > rdrobust 输出三行：Conventional、Bias-corrected、Robust CI。正确做法：**点估计报告 Bias-corrected，置信区间报告 Robust**（Calonico et al. 2014）。不要只报告 Conventional。
@@ -658,14 +723,15 @@ if (n_unique < 30) {
 # R: 汇总主结果表
 results_table <- data.frame(
   spec     = c("Local Linear (MSE bw)", "Local Quadratic (MSE bw)",
-               "Local Linear (0.5h)", "Local Linear (1.5h)"),
+               "Local Linear (0.5h)", "Local Linear (1.5h)",
+               "Parametric OLS (MSE bw)"),
   coef_bc  = c(rdd_main$coef["Bias-Corrected", 1], ...),
   ci_lo    = c(rdd_main$ci["Robust", 1], ...),
   ci_hi    = c(rdd_main$ci["Robust", 2], ...),
   h        = c(rdd_main$bws["h", 1], ...),
   n_left   = c(rdd_main$N_h[1], ...),
   n_right  = c(rdd_main$N_h[2], ...),
-  poly_p   = c(1, 2, 1, 1)
+  poly_p   = c(1, 2, 1, 1, NA)
 )
 ```
 
@@ -673,8 +739,9 @@ results_table <- data.frame(
 1. 主规格（p=1，MSE 最优带宽）
 2. 多项式阶数稳健性（p=2）
 3. 带宽变化稳健性（0.5h、1.5h）
-4. 有效样本量（断点两侧分别报告）
-5. CI 类型说明（bias-corrected robust）
+4. 参数法 OLS 对比（带宽内）
+5. 有效样本量（断点两侧分别报告）
+6. CI 类型说明（bias-corrected robust）
 
 ### 文件命名
 
@@ -687,5 +754,43 @@ output/
   rdd_bandwidth_sensitivity.csv  # 带宽敏感性
   rdd_placebo_cutoffs.csv        # 安慰剂断点
   rdd_donut_hole.csv             # Donut hole（仅操控时）
+  rdd_parametric_comparison.csv  # 参数法对比
   rdd_fuzzy_itt_tot.csv          # ITT/TOT 对比（Fuzzy 时）
+```
+
+---
+
+## Few-Shot 示例：贫困县政策（Meng 2013）
+
+> 以下为 RDD 经典应用的完整分析思路示例，用于帮助 Claude Code 理解预期输入输出。
+
+**场景描述：** 中国国家级贫困县认定基于各县人均收入是否低于某一阈值。低于阈值的县获得中央财政转移支付和优惠政策。研究问题：贫困县政策是否促进了经济增长？
+
+**断点类型：** 指标阈值（人均收入）
+
+**Sharp / Fuzzy：** Fuzzy RDD — 阈值以下的县大概率被认定为贫困县，但并非 100%（存在政治因素干预）
+
+**检验要点：**
+1. 密度检验：人均收入是否在阈值附近存在堆积（地方政府可能操控统计数据）
+2. 协变量平衡：阈值两侧的地理特征、人口特征等前定变量是否连续
+3. 第一阶段：阈值处"被认定为贫困县"的概率跳跃幅度（Fuzzy 关键）
+4. 安慰剂：在远离真实阈值处设假断点，检验系数是否为零
+
+**预期结果：**
+- 第一阶段跳跃显著（≥ 30 个百分点），Fuzzy RDD 可行
+- ITT 和 TOT 方向一致，TOT 幅度 > ITT（因 Complier 比例 < 1）
+- 密度检验需特别关注——如果地方政府操控收入统计，RDD 效度受威胁，需 Donut RD
+
+```r
+# 伪代码示例
+cutoff <- 400   # 人均收入阈值（元）
+df <- df %>% mutate(
+  r_centered   = per_capita_income - cutoff,
+  above_cutoff = as.integer(r_centered >= 0),    # 高于阈值 = 不贫困
+  is_poor_county = ...                            # 实际贫困县认定（Fuzzy）
+)
+
+# 主估计
+rdd_fuzzy <- rdrobust(y = df$gdp_growth, x = df$r_centered, c = 0,
+                       fuzzy = df$is_poor_county, p = 1, bwselect = "mserd")
 ```

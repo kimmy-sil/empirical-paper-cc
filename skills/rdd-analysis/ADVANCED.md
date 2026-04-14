@@ -21,12 +21,36 @@
 ### 与标准 RDD 的关键区别
 
 | 维度 | 标准截面 RDD | RDiT（时间 RDD） |
-|------|--------------|-----------------|
+|------|--------------|--------------------|
 | 评分变量 | 截面指标（考分、指标值） | 时间（日/周/月） |
 | 操控检验 | McCrary 密度检验必需 | 不可直接应用（时间不能"堆积"） |
 | 主要威胁 | 操控、协变量不平衡 | 时间序列自相关、季节性、同时政策 |
 | 内部效度假设 | 断点两侧潜在结果连续 | 政策日前后的趋势可控（无同期其他变化） |
 | 额外检验 | 协变量平衡、Donut hole | 自相关检验、季节性控制、预期效应检验 |
+
+> **方法论警告：RDiT 的内部效度通常弱于标准截面 RDD。**
+>
+> **核心原因：** 时间无法被视为"随机分配"（Hausman & Rapson 2018），
+> 因此 RDiT **不适用 local randomization 解释框架**，
+> 只能依赖 continuity-based 框架
+> （即潜在结果和混杂因素在政策日附近连续变化）。
+>
+> **RDiT 存在的理由**正是因为所有单位同时经历政策变化、缺乏截面变异，
+> 导致 DID 等需要处理组-对照组对比的方法不可用。
+> 这不是 RDiT 的内部效度缺陷，而是它被需要的场景特征。
+>
+> 相对于标准截面 RDD，RDiT 面临以下**额外威胁**：
+>
+> | 威胁 | 说明 | 应对 |
+> |------|------|------|
+> | 无法检验操控 | 时间密度均匀，McCrary 检验不可用 | Donut RD 作为替代 |
+> | 预期效应 | 个体可能提前调整行为 | 预期效应检验（假断点） |
+> | 同期冲击 | 政策日可能伴随其他变化 | 协变量连续性检验 + 安慰剂地区 |
+> | 序列相关 | 时间序列残差非独立（截面 RDD 不存在此问题） | HAC/Newey-West 标准误 |
+> | 自回归效应 | Y_t 依赖 Y_{t-1}，污染处理效应估计 | 纳入滞后项控制 |
+> | 带宽过宽 | 为增加样本量被迫扩大时间窗口，捕获时间趋势 | Augmented local linear 方法 |
+>
+> 因此，RDiT 需要比标准 RDD **更多的稳健性检验**才能建立可信度。
 
 ### R 代码模板（Hausman-Rapson 2018 框架）
 
@@ -127,6 +151,8 @@ print(rdit_bw_res)
 2. 季节性控制（Fourier 项 + 月/周固定效应）
 3. 预期效应检验（政策日前窗口假断点）
 4. 同期政策识别（记录研究期间同日期实施的其他政策）
+5. 自回归效应控制（在 feols 中加入滞后项 `lag(outcome, 1)`）
+6. HAC 标准误（若残差存在序列相关，使用 Newey-West 标准误替代聚类标准误）
 
 ---
 
@@ -225,10 +251,15 @@ summary(spillover_test)
 | 选择性迁居 | Donut hole（排除边界最近个体） | 排除选择性居住偏误 |
 | 安慰剂边界 | 用附近平行边界做安慰剂 | 边界不应显示虚假断点 |
 
-**前沿替代：** `rd2d` 包（Cattaneo et al. 2025）专用于二维地理 RDD，支持任意方向的边界和二维核估计。
+**前沿替代：rd2d（Cattaneo, Titiunik, Vazquez-Bare 2025）**
+
+> `rd2d` 包解决了传统地理 RDD 中**"将二维距离压缩为一维"的信息损失问题**。
+> 标准做法是计算每个观测到边界的最短距离，将二维位置信息压缩为一个标量，
+> 这会丢失沿边界方向的变异信息。`rd2d` 直接在二维空间中进行非参数估计，
+> 支持任意方向的边界和二维核函数，是地理 RDD 的正确前进方向。
 
 ```r
-# rd2d 包（Cattaneo2025，前沿方法）
+# rd2d 包（Cattaneo, Titiunik, Vazquez-Bare 2025，前沿方法）
 # devtools::install_github("rdpackages/rd2d")
 # library(rd2d)
 # rdd_2d <- rd2d(y = df$outcome,
@@ -236,7 +267,7 @@ summary(spillover_test)
 #                x2 = df$latitude,
 #                c1 = boundary_x_coords,
 #                c2 = boundary_y_coords)
-# 参考：Cattaneo, Titiunik, Vazquez-Bare (2025)
+# 优势：避免一维压缩的信息损失，捕获沿边界方向的异质效应
 ```
 
 ---
@@ -282,9 +313,9 @@ summary(rdd_mc)
 by_cutoff <- lapply(cutoffs_vec, function(c_val) {
   df_c <- df %>% filter(cutoff == c_val) %>%
     mutate(r_c = running_var - c_val)
-  
+
   if (min(sum(df_c$r_c >= 0), sum(df_c$r_c < 0)) < 20) return(NULL)
-  
+
   res <- rdrobust(y = df_c$outcome, x = df_c$r_c, c = 0, p = 1)
   data.frame(cutoff  = c_val,
              coef_bc = res$coef["Bias-Corrected", 1],
@@ -316,6 +347,33 @@ ggplot(by_cutoff, aes(x = as.factor(cutoff), y = coef_bc)) +
 1. **RDD 假设**：阈值附近连续性（无精确操控评分变量）
 2. **DID 假设**：阈值两侧的时间趋势在政策前平行（条件平行趋势）
 
+### Estimand 声明
+
+> **RD-DD 的估计对象（estimand）与纯 RDD 不同，需要单独声明。**
+>
+> - **纯 RDD** 的 estimand 是 **LATE at cutoff**（断点处局部平均处理效应）
+> - **RD-DD** 的 estimand 是 **断点附近 + 政策前后的差中差效应**，
+>   即"阈值两侧的结果差异在政策前后的变化量"
+> - RD-DD 同时利用了截面维度（断点两侧）和时间维度（政策前后）的变异
+> - 因此 RD-DD 的外部效度范围不同于纯 RDD：
+>   它不仅局限于 R ≈ c 的个体，还受制于特定的政策时间窗口
+>
+> **标准声明模板：**
+> ```
+> 本文 RD-DD 估计量识别的是：评分变量在阈值 [c] 附近的个体，
+> 在政策实施前后，处于阈值以上（处理组）与以下（对照组）之间
+> 的结果差异变化。该估计量同时要求 RDD 的连续性假设
+> 和 DID 的条件平行趋势假设成立。
+> ```
+
+### 带宽选择：必须基于政策前截面
+
+> ⚠️ **RD-DD 的带宽选择应基于政策前截面 RDD，而非全样本。**
+>
+> **原因：** 政策后数据已包含处理效应，用政策后数据选带宽会导致选择偏误——
+> 带宽算法会将处理效应误认为是函数形状的特征，从而系统性地选择过窄或过宽的带宽。
+> 政策前截面不含处理效应，能提供无偏的带宽估计。
+
 ```r
 # R: RD-DD 代码模板（rdrobust + fixest 结合）
 library(rdrobust)
@@ -331,6 +389,7 @@ df <- df %>%
   )
 
 # ---- Step 1：确定最优带宽（用政策前截面 RDD）----
+# ⚠️  必须用政策前数据，避免处理效应污染带宽选择
 bw_pre <- rdrobust(
   y = df$outcome[df$post == 0],
   x = df$r_centered[df$post == 0],
@@ -439,7 +498,7 @@ spillover_gradient <- feols(
 ### 推荐阅读
 
 | 主题 | 文献 | 核心贡献 |
-|------|------|---------|
+|------|------|----------|
 | RDD 基础 | Hahn, Todd, Van der Klaauw (2001) *Econometrica* | 局部多项式 RDD 理论基础 |
 | 带宽选择 | Calonico, Cattaneo, Titiunik (2014) *Econometrica* | CCT 带宽、Bias-corrected Robust CI |
 | 密度检验 | Cattaneo, Jansson, Ma (2018) *JASA* | rddensity，优于 McCrary 2008 |
