@@ -1,3 +1,8 @@
+---
+name: stats
+description: "描述统计与统计检验，含分布诊断、假设检验、Bootstrap"
+---
+
 # 描述性统计与统计检验
 
 ## 概述
